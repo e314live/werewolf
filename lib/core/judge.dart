@@ -194,8 +194,11 @@ class Judge {
   Role? get pendingRole => cur;
   set pendingRole(Role? v) => cur = v;
 
-  /// 发牌：洗牌后按座位发，只有本 seat 知道自己的 role
-  void deal() {
+  /// 发牌：洗牌后按座位发，只有本 seat 知道自己的 role。
+  ///
+  /// [seed] 只给测试用：传了就是确定性洗牌，测试结果不会随运行次数飘
+  /// （曾经有个"守卫能守别人"的用例随手挑了 0 号，守卫恰好坐上 0 号时必挂）。
+  void deal({int? seed}) {
     final pool = <Role>[];
     deck.forEach((r, n) => pool.addAll(List.filled(n, r)));
     // 防御：牌堆与座位数不一致时用平民补齐/截断
@@ -203,7 +206,7 @@ class Judge {
       pool.add(Role.villager);
     }
     if (pool.length > seats.length) pool.removeRange(seats.length, pool.length);
-    pool.shuffle(_rnd);
+    pool.shuffle(seed == null ? _rnd : Random(seed));
     for (var i = 0; i < seats.length; i++) {
       seats[i].role = pool[i];
     }

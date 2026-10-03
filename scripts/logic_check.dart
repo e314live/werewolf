@@ -99,12 +99,29 @@ void main() {
   check('结算后进入天亮', j.phase == Phase.dawn);
 
   print('--- 守卫 ---');
-  final g = Judge(playerCount: 12)..deal();
+  final g = Judge(playerCount: 12)..deal(seed: 7);
   g.cur = Role.guard;
   final me = g.guardSeat;
   check('守卫不能自守', me == null ? true : !g.guardProtect(me!));
   g.cur = Role.guard;
-  check('守卫能守别人', g.guardProtect(0));
+  // 挑一个"一定不是守卫自己"的座位：别让洗牌结果决定用例成败
+  final other = List.generate(12, (i) => i).firstWhere((i) => i != me);
+  check('守卫能守别人', g.guardProtect(other));
+
+  // 上面两条只覆盖了一种洗牌。曾经就因为"随手挑了 0 号当目标"，
+  // 本地侥幸过了、CI 上守卫正好坐 0 号直接挂。这里扫一遍种子，把整类问题钉死。
+  var guardOk = true;
+  for (var seed = 0; seed < 40; seed++) {
+    final gg = Judge(playerCount: 12)..deal(seed: seed);
+    gg.cur = Role.guard;
+    final my = gg.guardSeat;
+    if (my == null) continue;
+    if (gg.guardProtect(my)) guardOk = false; // 自守必须失败
+    gg.cur = Role.guard;
+    final o = List.generate(12, (i) => i).firstWhere((i) => i != my);
+    if (!gg.guardProtect(o)) guardOk = false; // 守非自己必须成功
+  }
+  check('40 种洗牌下：自守恒不成立、守别人恒成立', guardOk);
 
   print('--- 天黑杀人 ---');
   final k = Judge(playerCount: 12)..deal();
@@ -135,11 +152,14 @@ void main() {
   check('毒药独立生效', d3.length == 2 && !p.seats[7].alive);
 
   print('--- 守卫挡刀 ---');
-  final w = Judge(playerCount: 12)..deal();
+  final w = Judge(playerCount: 12)..deal(seed: 11);
   w.cur = Role.guard;
-  w.guardProtect(5);
+  // 同样：守的人必须是"守卫自己以外"的，否则 guardProtect 直接返回 false
+  final gs = w.guardSeat!;
+  final shielded = List.generate(12, (i) => i).firstWhere((i) => i != gs);
+  w.guardProtect(shielded);
   w.cur = Role.werewolf;
-  w.wolfKill(5);
+  w.wolfKill(shielded);
   w.cur = Role.witch;
   w.witchAct();
   final d4 = w.resolveNight();
