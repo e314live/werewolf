@@ -77,9 +77,8 @@ class _PlayerState extends State<PlayerPage> {
           tally = {};
         case 'vote_result':
           voting = false;
-          tally = (d['tally'] as Map?) ?? {};
-        case 'phase':
-          if (p == 'vote_revote') voting = false;
+          final t = d['tally'];
+          tally = t is Map ? Map<String, dynamic>.from(t) : {};
         case 'over':
           winner = d['winner'] as String?;
           actor = null;
@@ -104,7 +103,8 @@ class _PlayerState extends State<PlayerPage> {
     setState(() => stage = 'wait');
   }
 
-  void _sendAct(String kind, {int? target, bool? save, int? poison}) {
+  // save / poison 在协议里都是"目标座位号"，类型是 int? 不是 bool?
+  void _sendAct(String kind, {int? target, int? save, int? poison}) {
     guest.send(actMsg(kind, target: target, save: save, poison: poison));
     setState(() => actor = null);
   }

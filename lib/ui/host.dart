@@ -153,7 +153,8 @@ class _HostState extends State<HostPage> {
     });
     judge.deal();
     for (var s = 1; s < peopleCount; s++) {
-      lan.sendToSeat(s, msgRole(s, names[s], roleName[judge.seats[s].role!]));
+      // Map[key] 的静态类型是 V?，这里 msgRole 要的是 String，兜个底
+      lan.sendToSeat(s, msgRole(s, names[s], roleName[judge.seats[s].role!] ?? ''));
     }
     lan.broadcast(msgRoster(_rosterJson()));
     lan.broadcast(msgPhase('night', judge.round));

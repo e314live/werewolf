@@ -11,8 +11,11 @@ Future<List<String>> localIps() async {
       includeLoopback: false,
     );
     for (final i in list) {
-      final s = i.address.address;
-      if (!s.endsWith('.255') && !s.endsWith('.0')) out.add(s);
+      // NetworkInterface 没有 .address 字段，只有 .addresses(List<InternetAddress>)
+      for (final a in i.addresses) {
+        final s = a.address;
+        if (!s.endsWith('.255') && !s.endsWith('.0')) out.add(s);
+      }
     }
   } on SocketException {
     // 无网络时忽略
