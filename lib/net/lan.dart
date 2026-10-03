@@ -28,6 +28,9 @@ class LanHost {
   ServerSocket? _ss;
   int? _port;
   String? lastError;
+
+  /// 上一次失败是不是"没权限"而不是"端口被占用"
+  bool lastErrorIsPermission = false;
   final List<Socket> clients = [];
   final List<void Function(String, Map<String, dynamic>)> listeners = [];
 
@@ -36,6 +39,16 @@ class LanHost {
   /// 实际监听的端口（默认端口被占用时自动顺延）
   int get port => _port ?? defaultPort;
 
+  /// 把底层异常翻译成能看懂的原因
+  static bool _isPermDenied(String msg) {
+    final m = msg.toLowerCase();
+    return m.contains('denied') ||
+        m.contains('permitted') ||
+        m.contains('eacces') ||
+        m.contains('eperm') ||
+        m.contains('permission');
+  }
+
   /// 开房。preferred 起试，被占用就往后顺延，最多试 tries 个。
   /// 返回实际端口；全部失败返回 null（原因在 lastError）。
   Future<int?> start({
@@ -43,18 +56,27 @@ class LanHost {
     int tries = 12,
     void Function(String, Map<String, dynamic>)? onMsg,
   }) async {
-    if (onMsg != null) listeners.add(onMsg);
+    // 先停旧的，再注册回调，避免重复开房时回调被叠加多次
     await stop();
+    if (onMsg != null) listeners.add(onMsg);
     lastError = null;
+    lastErrorIsPermission = false;
     for (var i = 0; i < tries; i++) {
       final p = preferred + i;
       if (p > 65535) break;
       try {
         _ss = await ServerSocket.bind(InternetAddress.anyIPv4, p);
         _port = p;
+        // 成功就把前面几次试错留下的错误清掉，别让 UI 误报
+        lastError = null;
+        lastErrorIsPermission = false;
         break;
       } on SocketException catch (e) {
-        lastError = e.message.isEmpty ? '端口 $p 不可用' : e.message;
+        final raw = e.message.isEmpty ? e.osError?.message ?? '' : e.message;
+        lastErrorIsPermission = _isPermDenied(raw);
+        lastError = lastErrorIsPermission
+            ? '本机不允许 App 联网（缺少 INTERNET 权限），不是端口问题'
+            : (raw.isEmpty ? '端口 $p 不可用' : raw);
         _ss = null;
       }
     }
@@ -121,6 +143,7 @@ class LanHost {
       } catch (_) {}
     }
     clients.clear();
+    listeners.clear();
     await _ss?.close();
     _ss = null;
     _port = null;
@@ -140,7 +163,11 @@ class LanGuest {
     try {
       _sock = await Socket.connect(host, port, timeout: const Duration(seconds: 6));
     } on Exception catch (e) {
-      return '连不上房主 $host:$port —— $e';
+      final m = e.toString().toLowerCase();
+      if (m.contains('denied') || m.contains('permitted') || m.contains('eacces') || m.contains('eperm')) {
+        return '连不上房主：本机不允许 App 联网（缺少 INTERNET 权限），不是地址填错，请装最新版的狼邮杀';
+      }
+      return '连不上房主 $host:$port —— 检查是不是同一个 WiFi、房主屏幕上的地址有没有填错';
     }
     final buf = StringBuffer();
     _sock!.listen(

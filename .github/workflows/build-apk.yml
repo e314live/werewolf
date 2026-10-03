@@ -53,6 +53,7 @@ jobs:
         run: |
           flutter pub get
           dart run scripts/logic_check.dart
+          dart run scripts/port_check.dart
 
       - name: UI 冒烟测试
         run: flutter test
@@ -67,6 +68,17 @@ jobs:
 
       - name: 编 Release APK
         run: flutter build apk --release --split-per-abi --no-tree-shake-icons
+
+      # 回归关卡：release 包一旦丢掉 INTERNET 权限，开房时会表现为"所有端口都被占用"，
+      # 排查起来极费劲。这里直接拆开 APK 断言，缺权限就让构建红掉。
+      - name: 校验 APK 网络权限
+        run: |
+          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | tail -1)
+          APK=build/app/outputs/apk/release/app-arm64-v8a-release.apk
+          "$AAPT" dump badging "$APK" | grep '^uses-permission' | tee /tmp/perm.txt
+          grep -q "android.permission.INTERNET" /tmp/perm.txt \
+            || { echo "::error::release APK 缺 INTERNET 权限，联机必然失败"; exit 1; }
+          echo "✅ INTERNET 权限已打进 release 包"
 
       - name: 上传 APK 成品
         uses: actions/upload-artifact@v4

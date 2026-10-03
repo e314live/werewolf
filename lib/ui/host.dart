@@ -58,8 +58,9 @@ class _HostState extends State<HostPage> {
     final got = await lan.start(preferred: want, onMsg: _onFromClient);
     if (!mounted) return;
     if (got == null) {
-      setState(() => serveErr =
-          '端口 $want ~ ${want + 11} 全被占用（${lan.lastError ?? '未知原因'}），换个端口号再试');
+      setState(() => serveErr = lan.lastErrorIsPermission
+          ? '开房失败：${lan.lastError}。这不是端口的问题，换端口也没用，请装最新版的狼邮杀。'
+          : '端口 $want ~ ${want + 11} 全被占用（${lan.lastError ?? '未知原因'}），换个端口号再试');
       return;
     }
     setState(() => serving = true);
