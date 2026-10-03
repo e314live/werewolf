@@ -31,14 +31,18 @@ jobs:
         uses: flutter-actions/setup-flutter@v4
         with:
           channel: stable
-          version: '3.47.6'
-          submodules: true            # 必须带 submodule，否则 flutter_tester / engine 缺失
+          cache: true
 
-      - name: 依赖自检（跑内核单元测试）
-        run: flutter pub get && dart run scripts/logic_check.dart
+      - name: 接受 Android SDK 协议（漏这步 build apk 必挂）
+        run: yes | flutter doctor --android-licenses || true
+
+      - name: 内核自检
+        run: |
+          flutter pub get
+          dart run scripts/logic_check.dart
 
       - name: 编 Release APK
-        run: flutter build apk --release --split-per-abi
+        run: flutter build apk --release --split-per-abi --no-tree-shake-icons
 
       - name: 上传 APK 成品
         uses: actions/upload-artifact@v4
