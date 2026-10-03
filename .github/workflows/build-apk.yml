@@ -1,0 +1,51 @@
+name: Build Werewolf APK
+
+# 什么时候触发：推代码 / 提 PR / 手动点按钮
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:   # 仓库页面 Actions 标签页里可以手动点「Run workflow」
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest          # GitHub 官方的 Linux 虚拟机，自带 JDK & Gradle 缓存
+    timeout-minutes: 30
+
+    steps:
+      - name: 拉代码
+        uses: actions/checkout@v4
+
+      - name: 装 Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 装 Flutter
+        uses: flutter-actions/setup-flutter@v4
+        with:
+          channel: stable
+          version: '3.47.6'
+          submodules: true            # 必须带 submodule，否则 flutter_tester / engine 缺失
+
+      - name: 依赖自检（跑内核单元测试）
+        run: flutter pub get && dart run scripts/logic_check.dart
+
+      - name: 编 Release APK
+        run: flutter build apk --release --split-per-abi
+
+      - name: 上传 APK 成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: werewolf-apk
+          path: build/app/outputs/apk/release/*.apk
+          retention-days: 30          # 30 天后自动清，省存储
+
+      - name: 发出可安装链接（release 才发）
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/upload-artifact/attach@v4
+        with:
+          name: apk-attachment
+          path: build/app/outputs/apk/release/*.apk
