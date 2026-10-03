@@ -8,9 +8,10 @@ on:
     branches: [main, master]
   workflow_dispatch:   # 仓库页面 Actions 标签页里可以手动点「Run workflow」
 
-# 保护分支免被乱跑；读代码 + 上传产物够用
+# contents: write 是 softprops/action-gh-release 发 Release 必需的；
+# 只给 read 的话构建能成功但最后归档那步会报 Resource not accessible by integration
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-apk:
