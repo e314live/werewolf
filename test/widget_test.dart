@@ -20,9 +20,10 @@ void main() {
   testWidgets('首页两个入口都在', (WidgetTester tester) async {
     bigViewport(tester);
     await tester.pumpWidget(const WerewolfApp());
-    expect(find.text('宿舍狼人杀'), findsOneWidget);
+    expect(find.text('狼邮杀'), findsOneWidget);
     expect(find.text('我是房主'), findsOneWidget);
     expect(find.text('我是玩家'), findsOneWidget);
+    expect(find.byType(Image), findsWidgets); // 顶部的红月狼图标
   });
 
   testWidgets('房主建房页：人数 / 胜负条件 / 端口 都在', (WidgetTester tester) async {
