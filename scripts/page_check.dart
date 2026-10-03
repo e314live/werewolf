@@ -118,6 +118,10 @@ void main() {
     final f = File('${dir.path}/web_player_check.js');
     f.writeAsStringSync(js);
     ok(f.existsSync() && f.lengthSync() > 2000, 'JS 已导出：${f.path}');
+    // 顺手导出整页，方便本地双击预览"室友在浏览器里看到的样子"
+    final h = File('${dir.path}/web_player.html');
+    h.writeAsStringSync(p);
+    ok(h.lengthSync() > 5000, '整页已导出：${h.path}（双击即可预览首屏）');
     print('  → 接着用 node --check 验语法');
   }
 
