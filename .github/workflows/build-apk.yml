@@ -34,6 +34,18 @@ jobs:
           channel: stable
           cache: true
 
+      # 关键一步：把固定的签名证书还原到工程里。
+      # 证书存在仓库 Secrets 中（加密），公开仓库看不到明文。
+      # 有了它，每次构建出的 APK 签名都一样，手机上能直接覆盖安装升级。
+      - name: 还原签名证书
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/werewolf.jks
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=werewolf.jks\n' \
+            "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            "${{ secrets.ANDROID_KEY_PASSWORD }}" \
+            "${{ secrets.ANDROID_KEY_ALIAS }}" > android/key.properties
+          echo "签名证书已就位：$(ls -l android/app/werewolf.jks | awk '{print $5}') 字节"
+
       - name: 接受 Android SDK 协议（漏这步 build apk 必挂）
         run: yes | flutter doctor --android-licenses || true
 
@@ -45,6 +57,14 @@ jobs:
       - name: UI 冒烟测试
         run: flutter test
 
+      - name: 读取版本号
+        id: ver
+        run: |
+          V=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+          echo "full=$V" >> $GITHUB_OUTPUT
+          echo "name=${V%%+*}" >> $GITHUB_OUTPUT
+          echo "本局版本号: $V"
+
       - name: 编 Release APK
         run: flutter build apk --release --split-per-abi --no-tree-shake-icons
 
@@ -55,13 +75,11 @@ jobs:
           path: build/app/outputs/apk/release/*.apk
           retention-days: 30          # 30 天后自动清，省存储
 
-      - name: 打 Release 版本号（方便区分）
-        run: echo "BUILD_TAG=apk-$(date +%Y%m%d-%H%M)" >> $GITHUB_ENV
-
-      - name: 归档到 Release（私有仓库则有 200GB 空间，够用）
+      - name: 归档到 Release（免登录下载）
         if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: build/app/outputs/apk/release/*.apk
-          tag_name: v${{ github.run_number }}
+          tag_name: v${{ steps.ver.outputs.name }}-b${{ github.run_number }}
+          name: 狼邮杀 v${{ steps.ver.outputs.full }}（构建 ${{ github.run_number }}）

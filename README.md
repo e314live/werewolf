@@ -1,4 +1,4 @@
-# 🐺 宿舍狼人杀 · 局域网零后端
+# 🐺 狼邮杀 · 局域网零后端
 
 一台手机当**法官主机**，其余手机连**同一个 WiFi / 校园网**直连开局。
 不用蓝牙配对、不用开热点、不用服务器、不用备案、不要钱。
@@ -12,7 +12,9 @@
 
 ## 下载
 
-APK 在仓库右侧 **Releases** 页（或 Actions 页的 `werewolf-apk` 产物）下载。
+APK 在仓库右侧 **Releases** 页下载（公开仓库，不用登录 GitHub）：
+<https://github.com/e314live/werewolf/releases/latest>
+
 三个包按手机芯片选，绝大多数手机装 **arm64-v8a**：
 
 | 包 | 对应设备 |
@@ -22,6 +24,11 @@ APK 在仓库右侧 **Releases** 页（或 Actions 页的 `werewolf-apk` 产物�
 | `app-x86_64-release.apk` | PC 安卓模拟器（BlueStacks / MuMu） |
 
 装的时候系统会问"是否允许安装未知来源应用"，允许即可。
+
+> **升级不用卸载重装。** CI 用的是仓库里固定的一套签名证书（存在 GitHub Secrets，
+> 不进代码库），所以每个版本的 APK 签名都一致，装新版会**直接覆盖旧版**。
+> 早期版本因为签名每次都变，会出现"应用未安装"，装一次新包之后就正常了。
+
 
 ## 玩法
 
@@ -104,6 +111,7 @@ lib/
   ui/common.dart         共用控件（身份大卡 / 选人格子 / 夜晚遮罩）
 scripts/logic_check.dart ★ 内核自检 39 项（单进程，不需要 flutter）
 test/widget_test.dart    UI 冒烟测试
+assets/icon.png          应用图标（红月狼）
 build_apk.bat            一键出 APK（Windows）
 ```
 

@@ -11,7 +11,7 @@ class WerewolfApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '宿舍狼人杀',
+      title: '狼邮杀',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
@@ -43,11 +43,22 @@ class HomePage extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Text('🐺', style: TextStyle(fontSize: 88)),
-                const SizedBox(height: 12),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(30),
+                  child: Image.asset(
+                    'assets/icon.png',
+                    width: 138,
+                    height: 138,
+                    fit: BoxFit.cover,
+                    // 万一分发时资源缺失，退回 emoji，不至于开屏就报错
+                    errorBuilder: (_, __, ___) =>
+                        const Text('🐺', style: TextStyle(fontSize: 88)),
+                  ),
+                ),
+                const SizedBox(height: 18),
                 const Text(
-                  '宿舍狼人杀',
-                  style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900, letterSpacing: 3),
+                  '狼邮杀',
+                  style: TextStyle(fontSize: 40, fontWeight: FontWeight.w900, letterSpacing: 5),
                 ),
                 const SizedBox(height: 6),
                 const Text(
