@@ -102,7 +102,7 @@ void main() {
   final g = Judge(playerCount: 12)..deal(seed: 7);
   g.cur = Role.guard;
   final me = g.guardSeat;
-  check('守卫不能自守', me == null ? true : !g.guardProtect(me!));
+  check('守卫不能自守', me == null ? true : !g.guardProtect(me));
   g.cur = Role.guard;
   // 挑一个"一定不是守卫自己"的座位：别让洗牌结果决定用例成败
   final other = List.generate(12, (i) => i).firstWhere((i) => i != me);

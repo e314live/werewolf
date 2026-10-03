@@ -94,7 +94,8 @@ class _HostState extends State<HostPage> {
     if (id != null) lan.sendToPeer(id, line);
   }
 
-  void _started() => j != null;
+  /// 这一局有没有真的开始（开始了掉线就保留座位，等他用同一个 cid 回来）
+  bool _started() => j != null;
 
   void _onFromClient(String peerId, Map<String, dynamic> m) {
     final t = m['t'] as String?;

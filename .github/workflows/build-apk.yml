@@ -75,6 +75,12 @@ jobs:
           grep -q "HOST DONE" /tmp/host.log \
             || { echo "::error::房主没收到 /bye，退出腾座位这条路径断了"; exit 1; }
 
+      # 本地那台机器跑不了 dart analyze（Dart 建不了子进程），
+      # 于是"字段初始化式里读了 this""声明成 void 却当 bool 用"这类编译错误
+      # 只会在这一步才暴露。放到最前面，几十秒就能红，别等 APK 编完。
+      - name: 静态检查
+        run: flutter analyze --no-fatal-infos
+
       - name: UI 冒烟测试
         run: flutter test
 

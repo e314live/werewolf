@@ -21,7 +21,9 @@ class _PlayerState extends State<PlayerPage> {
   /// 本次开 App 的稳定身份：断线重连时房主凭它认回原来的座位
   final String cid =
       'g${DateTime.now().microsecondsSinceEpoch}-${Random().nextInt(99999)}';
-  final guest = LanGuest(cid);
+
+  /// late：LanGuest 的构造要读 this.cid，普通字段初始化式里读不到 this
+  late final LanGuest guest = LanGuest(cid);
 
   String stage = 'connect'; // connect|wait|play|over
   String? err;
