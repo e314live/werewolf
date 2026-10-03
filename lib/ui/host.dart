@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import '../core/judge.dart';
@@ -17,40 +15,55 @@ class HostPage extends StatefulWidget {
 class _HostState extends State<HostPage> {
   int peopleCount = 9;
   bool sheriffOn = true;
+  WinMode winMode = WinMode.slaughterSide;
+  int? wolfOverride; // null = 按人数自动配狼
+
+  final portCtrl = TextEditingController(text: '$defaultPort');
 
   List<String> ips = [];
   final lan = LanHost();
   bool serving = false;
   String? serveErr;
 
+  /// 解析客户端上报的数字/布尔，收到脏数据不崩
+  static int? _asInt(dynamic v) => v is int ? v : (v is num ? v.toInt() : null);
+  static bool? _asBool(dynamic v) => v is bool ? v : null;
+
   Judge? j;
   final List<String> names = ['房主(你)'];
   final Set<int> joined = {0};
-  final Set<int> roleAcked = {};
   final Set<String> nightDone = {};
   final Set<int> voted = {};
-  bool revote = false;   // 上一轮平票/流局，重新投
-  int? gunTarget;
-
-  int talkLeft = 0;
-  Timer? _t;
+  bool revote = false;      // 上一轮平票，正在重投
+  bool hostVoted = false;   // 房主（0 号）这一轮投过票没
 
   bool get allJoined => joined.length >= peopleCount;
 
   @override
   void dispose() {
-    _t?.cancel();
     lan.stop();
+    portCtrl.dispose();
     super.dispose();
   }
 
   /* ---------------- 开房间 ---------------- */
   Future<void> _serve() async {
-    final err = await lan.start(lanPort, onMsg: _onFromClient);
+    final want = int.tryParse(portCtrl.text.trim()) ?? defaultPort;
+    if (want < 1024 || want > 65535) {
+      setState(() => serveErr = '端口请填 1024~65535 之间的数字');
+      return;
+    }
+    setState(() => serveErr = null);
+    // 被占用会自动往后顺延，最多试 12 个
+    final got = await lan.start(preferred: want, onMsg: _onFromClient);
     if (!mounted) return;
-    setState(() => serveErr = err);
-    if (err != null) return;
+    if (got == null) {
+      setState(() => serveErr =
+          '端口 $want ~ ${want + 11} 全被占用（${lan.lastError ?? '未知原因'}），换个端口号再试');
+      return;
+    }
     setState(() => serving = true);
+    if (got != want) _toast('端口 $want 被占用，已自动改用 $got');
     _ips();
   }
 
@@ -68,11 +81,14 @@ class _HostState extends State<HostPage> {
       if (seat < 0 || seat >= peopleCount) return;
       if (!mounted) return;
       setState(() {
-        if (seat >= names.length) names.add('');
+        while (names.length <= seat) {
+          names.add('');
+        }
         names[seat] = name;
         joined.add(seat);
       });
-      lan.sendToSeat(seat, msgRole(seat, name, '...'));
+      // 此时还没发牌，只广播名册；牌在开局时单独下发
+      lan.broadcast(msgRoster(_rosterJson()));
     } else if (t == 'act' || t == 'pass') {
       final seat = _seatByIp(ip);
       if (seat == null) return;
@@ -82,7 +98,7 @@ class _HostState extends State<HostPage> {
       }
       final kind = d['kind'] as String?;
       if (kind == 'vote') {
-        final target = d['target'] as int?;
+        final target = _asInt(d['target']);
         if (target != null) {
           setState(() {
             _votes[target] = (_votes[target] ?? 0) + 1;
@@ -92,9 +108,7 @@ class _HostState extends State<HostPage> {
         return;
       }
       _handleAction(seat, kind,
-          target: d['target'] as int?,
-          save: d['save'] as bool?,
-          poison: d['poison'] as int?);
+          target: _asInt(d['target']), save: _asBool(d['save']), poison: _asInt(d['poison']));
     }
   }
 
@@ -144,17 +158,23 @@ class _HostState extends State<HostPage> {
       _toast('还差 ${peopleCount - joined.length} 人没进房间');
       return;
     }
-    final judge = Judge(playerCount: peopleCount, sheriffEnabled: sheriffOn);
+    final judge = Judge(
+      playerCount: peopleCount,
+      sheriffEnabled: sheriffOn,
+      winMode: winMode,
+      wolfOverride: wolfOverride,
+    );
     setState(() {
       j = judge;
       nightDone.clear();
       voted.clear();
+      hostVoted = false;
+      revote = false;
       _votes.clear();
     });
     judge.deal();
     for (var s = 1; s < peopleCount; s++) {
-      // Map[key] 的静态类型是 V?，这里 msgRole 要的是 String，兜个底
-      lan.sendToSeat(s, msgRole(s, names[s], roleName[judge.seats[s].role!] ?? ''));
+      lan.sendToSeat(s, msgRole(s, names[s], judge.seats[s].role!.index));
     }
     lan.broadcast(msgRoster(_rosterJson()));
     lan.broadcast(msgPhase('night', judge.round));
@@ -162,18 +182,11 @@ class _HostState extends State<HostPage> {
 
   List<dynamic> _rosterJson() => List.generate(peopleCount, (i) => {
         'id': i,
-        'name': names[i],
+        'name': i < names.length && names[i].isNotEmpty ? names[i] : (i == 0 ? '房主' : '玩家${i + 1}'),
         'alive': true,
         'role': null,
         'isOwner': i == 0,
       });
-
-  void _beginNight() {
-    final judge = j!;
-    nightDone.clear();
-    setState(() {});
-    lan.broadcast(msgPhase('night', judge.round));
-  }
 
   void _callWake() {
     final judge = j!;
@@ -194,8 +207,20 @@ class _HostState extends State<HostPage> {
     final wolves = r == Role.werewolf
         ? judge.seats.where((s) => s.role == Role.werewolf && s.alive).map((s) => s.id).toList()
         : null;
-    // 女巫需要知道今夜被刀的是谁，预言家/守卫/狼人不需要
-    lan.sendToSeat(seat, msgWake(seat, r.name, wolves: wolves, target: r == Role.witch ? judge.nightVictim : null));
+    // 女巫需要知道今夜被刀的是谁 + 自己药还剩几瓶
+    final witchSeat = r == Role.witch ? judge.witchSeat : null;
+    lan.sendToSeat(
+        seat,
+        msgWake(
+          seat,
+          r.name,
+          wolves: wolves,
+          target: r == Role.witch ? judge.nightVictim : null,
+          canHeal:
+              witchSeat != null ? !judge.seats[witchSeat].usedHeal : null,
+          canPoison:
+              witchSeat != null ? !judge.seats[witchSeat].usedPoison : null,
+        ));
     setState(() {});
   }
 
@@ -220,16 +245,21 @@ class _HostState extends State<HostPage> {
   List<int> _aliveList() =>
       j!.seats.where((s) => s.alive).map((s) => s.id).toList();
 
-  void _openVote() {
-    lan.broadcast(msgVoteOpen(_aliveList()));
+  /// 开投票；isRevote=true 表示上一轮平票重投
+  void _openVote({bool isRevote = false}) {
+    revote = isRevote;
     voted.clear();
-    revote = false;
+    hostVoted = false;
+    _votes.clear();
+    lan.broadcast(msgVoteOpen(_aliveList(), revote: isRevote));
     setState(() {});
   }
 
   void _checkOver() {
-    final w = j!.checkWinner();
+    final judge = j!;
+    final w = judge.checkWinner();
     if (w != null) {
+      judge.phase = Phase.over;
       lan.broadcast(msgOver(w));
       setState(() {});
     }
@@ -255,30 +285,142 @@ class _HostState extends State<HostPage> {
         children: [
           const Text('人数',
               style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              IconButton.filledTonal(
+                onPressed: peopleCount > minPlayers
+                    ? () => setState(() {
+                          peopleCount--;
+                          wolfOverride = null;
+                        })
+                    : null,
+                icon: const Icon(Icons.remove),
+              ),
+              Expanded(
+                child: Center(
+                  child: Text('$peopleCount 人',
+                      style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
+                ),
+              ),
+              IconButton.filledTonal(
+                onPressed: peopleCount < maxPlayers
+                    ? () => setState(() {
+                          peopleCount++;
+                          wolfOverride = null;
+                        })
+                    : null,
+                icon: const Icon(Icons.add),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
           Wrap(
-            spacing: 12,
-            children: [6, 9, 12]
+            spacing: 10,
+            runSpacing: 8,
+            children: [6, 7, 8, 9, 10, 11, 12, 14, 16]
                 .map((n) => ChoiceChip(
-                      label: Text('$n 人'),
+                      label: Text('$n'),
                       selected: peopleCount == n,
                       showCheckmark: false,
-                      onSelected: (_) => setState(() => peopleCount = n),
+                      onSelected: (_) => setState(() {
+                        peopleCount = n;
+                        wolfOverride = null;
+                      }),
                     ))
                 .toList(),
           ),
-          const SizedBox(height: 8),
-          Text(
-            _deckText(),
-            style: const TextStyle(fontSize: 12, color: Colors.white54, height: 1.6),
+          const SizedBox(height: 6),
+          const Text('标准局是 6 / 9 / 12 人，但人数随便定（6~18），牌堆会自动配好',
+              style: TextStyle(fontSize: 12, color: Colors.white38)),
+          const SizedBox(height: 18),
+          Panel(
+            color: const Color(0xFF3F8EE0),
+            icon: Icons.style,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('本局牌堆',
+                    style: TextStyle(fontSize: 12, color: Colors.white60)),
+                const SizedBox(height: 10),
+                Text(
+                  _deckText(),
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w800, height: 1.6),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '狼人 ${wolfOverride ?? autoWolfCount(peopleCount)} 个'
+                        '${wolfOverride == null ? '（按人数自动）' : '（手动指定）'}',
+                        style: const TextStyle(fontSize: 12, color: Colors.white60),
+                      ),
+                    ),
+                    IconButton(
+                        onPressed: (wolfOverride ?? autoWolfCount(peopleCount)) > 1
+                            ? () => setState(() =>
+                                wolfOverride = (wolfOverride ?? autoWolfCount(peopleCount)) - 1)
+                            : null,
+                        icon: const Icon(Icons.remove_circle_outline, size: 20)),
+                    IconButton(
+                        onPressed: (wolfOverride ?? autoWolfCount(peopleCount)) < peopleCount - 2
+                            ? () => setState(() =>
+                                wolfOverride = (wolfOverride ?? autoWolfCount(peopleCount)) + 1)
+                            : null,
+                        icon: const Icon(Icons.add_circle_outline, size: 20)),
+                    if (wolfOverride != null)
+                      TextButton(
+                          onPressed: () => setState(() => wolfOverride = null),
+                          child: const Text('自动')),
+                  ],
+                ),
+              ],
+            ),
           ),
+          const SizedBox(height: 18),
+          const Text('胜负条件',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 10),
+          SegmentedButton<WinMode>(
+            segments: WinMode.values
+                .map((m) => ButtonSegment(value: m, label: Text(winModeName[m]!)))
+                .toList(),
+            selected: {winMode},
+            showSelectedIcon: false,
+            onSelectionChanged: (s) => setState(() => winMode = s.first),
+          ),
+          const SizedBox(height: 8),
+          Text(winModeDesc[winMode]!,
+              style: const TextStyle(fontSize: 12, color: Colors.white54, height: 1.6)),
+          const SizedBox(height: 12),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('开启警长竞选'),
             value: sheriffOn,
             onChanged: (v) => setState(() => sheriffOn = v),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 18),
+          Row(
+            children: [
+              const Text('监听端口',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+              const SizedBox(width: 16),
+              Expanded(
+                child: TextField(
+                  controller: portCtrl,
+                  enabled: !serving,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(hintText: '7788', isDense: true),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text('被占用会自动往后顺延（7788→7789→…），室友按屏幕上显示的地址填',
+              style: TextStyle(fontSize: 12, color: Colors.white38)),
+          const SizedBox(height: 24),
           if (!serving)
             FilledButton.icon(
               onPressed: _serve,
@@ -298,7 +440,7 @@ class _HostState extends State<HostPage> {
                   ...ips.map((ip) => Padding(
                         padding: const EdgeInsets.only(bottom: 6),
                         child: SelectableText(
-                          '$ip:$lanPort',
+                          '$ip:${lan.port}',
                           style: const TextStyle(
                               fontSize: 26,
                               fontWeight: FontWeight.w900,
@@ -346,8 +488,16 @@ class _HostState extends State<HostPage> {
   }
 
   String _deckText() {
-    final p = presets[peopleCount] ?? presets[9]!;
-    return '本局牌堆：${p.entries.map((e) => '${roleName[e.key]}×${e.value}').join('  ')}';
+    final p = deckFor(peopleCount, wolfOverride: wolfOverride);
+    final order = <Role>[...Role.values]..sort((a, b) {
+        // 展示顺序：狼、神、民
+        int rank(Role r) => r == Role.werewolf ? 0 : (r == Role.villager ? 2 : 1);
+        return rank(a).compareTo(rank(b));
+      });
+    return order
+        .where((r) => (p[r] ?? 0) > 0)
+        .map((r) => '${roleName[r]}×${p[r]}')
+        .join('   ');
   }
 
   /* ---------------- 法官控制页 ---------------- */
@@ -373,12 +523,18 @@ class _HostState extends State<HostPage> {
   Widget _statusBar() {
     final judge = j!;
     final alive = _aliveList();
-    final w = judge.seats.where((s) => s.alive && s.role == Role.werewolf).length;
-    return Row(
+    final w = judge.aliveWolfCount;
+    final g = judge.aliveGodCount;
+    final v = judge.aliveVillagerCount;
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
       children: [
-        _chip('${alive.length} 人存活', Colors.white70),
-        const SizedBox(width: 8),
+        _chip('${alive.length}/${judge.playerCount} 存活', Colors.white70),
         _chip('狼 $w', const Color(0xFFD33F49)),
+        if (g > 0) _chip('神 $g', const Color(0xFFE8A33D)),
+        if (v > 0) _chip('民 $v', const Color(0xFF5A8FD6)),
+        _chip(winModeName[judge.winMode]!, const Color(0xFF8E5BD6)),
       ],
     );
   }
@@ -502,7 +658,7 @@ class _HostState extends State<HostPage> {
         const SizedBox(height: 14),
         FilledButton.icon(
           onPressed: () {
-            setState(() => j!.phase = Phase.voting);
+            j!.phase = Phase.voting;
             _openVote();
           },
           icon: const Icon(Icons.how_to_vote),
@@ -526,65 +682,95 @@ class _HostState extends State<HostPage> {
   Widget _voteCard() {
     final judge = j!;
     final alive = _aliveList();
-    final all = revote || voted.length >= alive.length;
+    final waiting = alive.length - voted.length;
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Panel(
           color: const Color(0xFF5A8FD6),
           icon: Icons.how_to_vote,
           child: Column(
             children: [
-              Text(revote ? '平票/流局，重新投票' : '投票中',
+              Text(revote ? '平票，重新投票' : '投票中',
                   style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
               const SizedBox(height: 10),
-              Text('已收到 ${voted.length}/$alive 票',
-                  style: const TextStyle(fontSize: 13, color: Colors.white70)),
+              Text(
+                '已收到 ${voted.length}/${alive.length} 票'
+                '${waiting > 0 ? '，还差 $waiting 人' : '，人齐了'}',
+                style: const TextStyle(fontSize: 13, color: Colors.white70),
+              ),
             ],
           ),
         ),
-        const SizedBox(height: 14),
-        if (all)
-          FilledButton.icon(
-            onPressed: _resolveVote,
-            icon: const Icon(Icons.bolt),
-            label: const Text('结算票数'),
-          )
-        else
+        const SizedBox(height: 18),
+        // 房主也是玩家（0 号），这一票得能投，否则票永远收不齐
+        Text(hostVoted ? '✓ 你已经投过票了' : '轮到你了：点一个座位投票',
+            style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: hostVoted ? const Color(0xFF4CAF7D) : Colors.white70)),
+        const SizedBox(height: 12),
+        PickerGrid(
+          seatCount: judge.playerCount,
+          target: -1,
+          dead: _deadFor(0),
+          enabled: !hostVoted,
+          onPick: (t) {
+            setState(() {
+              _votes[t] = (_votes[t] ?? 0) + 1;
+              voted.add(0);
+              hostVoted = true;
+            });
+          },
+          label: hostVoted ? null : '点一个座位，投出你的票',
+        ),
+        const SizedBox(height: 20),
+        FilledButton.icon(
+          onPressed: _resolveVote,
+          icon: const Icon(Icons.bolt),
+          label: Text(waiting > 0 ? '不等了，直接结算' : '结算票数'),
+        ),
+        if (waiting > 0)
           const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 40),
-            child: Text('等室友投完…', textAlign: TextAlign.center, style: TextStyle(color: Colors.white38)),
+            padding: EdgeInsets.only(top: 10),
+            child: Text('投完的室友可以催一催；实在不投也能直接结算',
+                style: TextStyle(fontSize: 11, color: Colors.white38)),
           ),
       ],
     );
   }
 
+  /// 房主视角的出局座位（不含自己）
+  List<int> _deadFor(int self) {
+    final judge = j!;
+    final out = <int>[];
+    for (var i = 0; i < judge.playerCount; i++) {
+      if (!judge.seats[i].alive && i != self) out.add(i);
+    }
+    return out;
+  }
+
   void _resolveVote() {
-    // 实际计数：由各客户端上报，这里用 _votes 累加
     final t = _votes;
-    final max = t.values.isEmpty ? 0 : t.values.reduce((a, b) => a > b ? a : b);
+    if (t.isEmpty) {
+      _toast('一票都没有，本轮无人出局');
+      _finishEject(null, null);
+      return;
+    }
+    final max = t.values.reduce((a, b) => a > b ? a : b);
     final top = t.entries.where((e) => e.value == max).map((e) => e.key).toList();
     if (top.length > 1) {
-      // 平票 -> 流局，重新投
-      _toast('平票，重新投票');
-      voted.clear();
-      _votes.clear();
-      revote = true;
-      lan.broadcast(msgPhase('vote_revote', j!.round));
-      setState(() {});
+      // 平票 -> 重新投一轮（重新广播 vote_open，玩家端才会重新弹出投票界面）
+      _toast('${top.map((e) => '${e + 1}号').join('、')} 平票，重投一轮');
+      j!.phase = Phase.voting;
+      _openVote(isRevote: true);
       return;
     }
-    final victim = top.isEmpty ? null : top.first;
-    if (victim == null) {
-      _toast('没有人得票，流局');
-      voted.clear();
-      setState(() {});
-      return;
-    }
+    final victim = top.first;
     final judge = j!;
     final role = judge.seats[victim].role;
     final canGun = role == Role.hunter && !judge.seats[victim].usedGun;
     if (canGun) {
-      setState(() => gunTarget = victim);
       _askGun(victim);
     } else {
       _finishEject(victim, null);
@@ -598,9 +784,14 @@ class _HostState extends State<HostPage> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('放逐的是猎人，要问是否开枪吗？'),
-        content: const Text('开枪会带走一个人（房主决定目标），被毒死不能开枪。'),
+        content: const Text('问猎人：开不开枪？开的话他指定一个人带走（被女巫毒死的猎人不能开枪）。'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('不开枪')),
+          TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _finishEject(victim, null);
+              },
+              child: const Text('不开枪')),
           TextButton(
               onPressed: () {
                 Navigator.pop(context);
@@ -613,43 +804,50 @@ class _HostState extends State<HostPage> {
   }
 
   void _gunPick(int victim) {
+    final judge = j!;
+    final targets = List.generate(judge.playerCount, (i) => i)
+        .where((i) => judge.seats[i].alive && i != victim)
+        .toList();
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('猎人开枪，选目标'),
-        content: const Text('选一个人带走，或留空取消'),
+        content: Text(targets.isEmpty
+            ? '场上没有可带走的人了'
+            : '让猎人指定带走谁：${targets.map((i) => '${i + 1}号').join('、')}'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')) ,
-          ...List.generate(j!.playerCount, (i) {
-            if (!j!.seats[i].alive || i == victim) return const SizedBox.shrink();
-            return TextButton(
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          ...targets.map((i) => TextButton(
                 onPressed: () {
                   Navigator.pop(context);
                   _finishEject(victim, i);
                 },
-                child: Text('${i + 1} 号'));
-          }),
+                child: Text('${i + 1} 号'),
+              )),
         ],
       ),
     );
   }
 
-  void _finishEject(int victim, int? gun) {
+  void _finishEject(int? victim, int? gun) {
     final judge = j!;
-    final deaths = <int>[victim];
-    judge.seats[victim].alive = false;
-    if (gun != null) {
-      judge.seats[gun].alive = false;
-      deaths.add(gun);
-    }
+    if (victim != null) judge.seats[victim].alive = false;
+    if (gun != null) judge.seats[gun].alive = false;
     lan.broadcast(msgVoteResult(
-        {'tally': _votes, 'ejected': victim, 'gun': gun}, victim, gun));
+        {'tally': _votes.map((k, v) => MapEntry('$k', v))}, victim, gun));
     _votes.clear();
     voted.clear();
-    judge.startNextNight();
-    nightDone.clear();
+    hostVoted = false;
+    revote = false;
     setState(() {});
     _checkOver();
+    if (judge.phase != Phase.over) {
+      judge.startNextNight();
+      nightDone.clear();
+      // 告诉所有玩家：新一轮天黑，清掉上一轮的投票结果等状态
+      lan.broadcast(msgPhase('night', judge.round));
+    }
+    setState(() {});
   }
 
   Widget _overCard() {
@@ -665,7 +863,10 @@ class _HostState extends State<HostPage> {
                   fontSize: 26,
                   fontWeight: FontWeight.w900,
                   color: win ? const Color(0xFF4CAF7D) : const Color(0xFFD33F49))),
-          const SizedBox(height: 14),
+          const SizedBox(height: 10),
+          Text('${winModeName[j!.winMode]}局 · ${j!.winReason()}',
+              style: const TextStyle(fontSize: 13, color: Colors.white70)),
+          const SizedBox(height: 16),
           const Text('翻牌时间到，大家好牌！',
               style: TextStyle(color: Colors.white60)),
           const SizedBox(height: 4),

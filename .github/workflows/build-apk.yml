@@ -42,6 +42,9 @@ jobs:
           flutter pub get
           dart run scripts/logic_check.dart
 
+      - name: UI 冒烟测试
+        run: flutter test
+
       - name: 编 Release APK
         run: flutter build apk --release --split-per-abi --no-tree-shake-icons
 

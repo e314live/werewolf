@@ -30,12 +30,62 @@ const Map<Role, int> roleColor = {
   Role.guard: 0xFF33A1B1,
 };
 
-/// 预设牌堆：人数 -> 角色人数
+/// 神职 = 非狼非民（屠边判定用）
+bool isGodRole(Role r) => r != Role.werewolf && r != Role.villager;
+
+/// 人数上限/下限
+const int minPlayers = 6;
+const int maxPlayers = 18;
+
+/// 胜利条件
+enum WinMode {
+  slaughterSide, // 屠边：狼杀光全部神职 或 杀光全部平民
+  slaughterAll,  // 屠城：狼把好人一个不剩地杀光
+}
+
+const Map<WinMode, String> winModeName = {
+  WinMode.slaughterSide: '屠边',
+  WinMode.slaughterAll: '屠城',
+};
+
+const Map<WinMode, String> winModeDesc = {
+  WinMode.slaughterSide: '狼人杀光所有神职（预言家/女巫/猎人/守卫），或杀光所有平民，即狼胜。节奏快，主流玩法。',
+  WinMode.slaughterAll: '狼人必须把好人一个不剩地全杀光才算赢。拖得久，新手局更友好。',
+};
+
+/// 标准局预设牌堆（人数 -> 角色人数）
 const Map<int, Map<Role, int>> presets = {
-  6: {Role.werewolf: 2, Role.villager: 2, Role.seer: 1, Role.guard: 1},
+  6: {Role.werewolf: 2, Role.villager: 2, Role.seer: 1, Role.witch: 1},
   9: {Role.werewolf: 3, Role.villager: 3, Role.seer: 1, Role.witch: 1, Role.hunter: 1},
   12: {Role.werewolf: 4, Role.villager: 4, Role.seer: 1, Role.witch: 1, Role.hunter: 1, Role.guard: 1},
 };
+
+/// 神职出场优先级：人少时先上预言家、女巫
+const List<Role> godOrder = [Role.seer, Role.witch, Role.hunter, Role.guard];
+
+/// 任意人数自动配牌：
+///   狼数 ≈ 人数/3（四舍五入，下限 1，至少给好人留 2 席）
+///   神职数 = min(狼数, 4, 剩余席位)，按 godOrder 补，其余全是平民
+/// 保证：牌堆总数 == 人数，且至少各有 1 神、1 民（除非狼数被手动调到极端值）
+Map<Role, int> deckFor(int n, {int? wolfOverride}) {
+  final total = n < minPlayers ? minPlayers : n;
+  var w = wolfOverride ?? (total / 3).round();
+  if (w < 1) w = 1;
+  if (w > total - 2) w = total - 2;
+  var g = w > godOrder.length ? godOrder.length : w;
+  final rest = total - w;
+  if (g > rest) g = rest;
+  final pool = <Role, int>{Role.werewolf: w};
+  for (var i = 0; i < g; i++) {
+    pool[godOrder[i]] = 1;
+  }
+  final v = total - w - g;
+  if (v > 0) pool[Role.villager] = v;
+  return pool;
+}
+
+/// 该人数的自动狼数（UI 展示用）
+int autoWolfCount(int n) => deckFor(n)[Role.werewolf] ?? 1;
 
 enum Phase {
   lobby,      // 准备
@@ -85,6 +135,8 @@ class JudgeEvent {
 class Judge {
   final int playerCount;
   final bool sheriffEnabled;
+  final WinMode winMode;
+  final int? wolfOverride; // null = 自动配狼
   final List<Seat> seats;
   final Random _rnd = Random();
 
@@ -99,10 +151,21 @@ class Judge {
   List<int> deaths = [];   // 本日出局
   String? winner;
 
-  Judge({required this.playerCount, this.sheriffEnabled = true})
-      : seats = List.generate(playerCount, (i) => Seat(i, '玩家${i + 1}'));
+  /// 开局快照：本局是否存在神职 / 平民（屠边判定用，防止"本来就没有"被判负）
+  bool hasGod = false;
+  bool hasVillager = false;
+
+  Judge({
+    required this.playerCount,
+    this.sheriffEnabled = true,
+    this.winMode = WinMode.slaughterSide,
+    this.wolfOverride,
+  }) : seats = List.generate(playerCount, (i) => Seat(i, '玩家${i + 1}'));
 
   bool get started => phase != Phase.lobby;
+
+  /// 本局牌堆
+  Map<Role, int> get deck => deckFor(playerCount, wolfOverride: wolfOverride);
 
   int? get wolfSeat {
     if (cur != Role.werewolf) return null;
@@ -134,10 +197,18 @@ class Judge {
   /// 发牌：洗牌后按座位发，只有本 seat 知道自己的 role
   void deal() {
     final pool = <Role>[];
-    final preset = presets[playerCount] ?? presets[9]!;
-    preset.forEach((r, n) => pool.addAll(List.filled(n, r)));
+    deck.forEach((r, n) => pool.addAll(List.filled(n, r)));
+    // 防御：牌堆与座位数不一致时用平民补齐/截断
+    while (pool.length < seats.length) {
+      pool.add(Role.villager);
+    }
+    if (pool.length > seats.length) pool.removeRange(seats.length, pool.length);
     pool.shuffle(_rnd);
-    for (var i = 0; i < seats.length; i++) seats[i].role = pool[i];
+    for (var i = 0; i < seats.length; i++) {
+      seats[i].role = pool[i];
+    }
+    hasGod = seats.any((s) => isGodRole(s.role!));
+    hasVillager = seats.any((s) => s.role == Role.villager);
     phase = Phase.nightRole;
     round = 1;
     cur = nightOrder.first;
@@ -173,12 +244,13 @@ class Judge {
     return seats[target].role;
   }
 
-  /// 女巫行动；解药与毒药各限一次
+  /// 女巫行动；解药必须用在今夜被刀的人身上，毒药可选任意人，各限一次
   void witchAct({bool? save, int? poison}) {
     if (cur != Role.witch) return;
     final w = witchSeat;
     if (w == null) return;
-    if (save == true && !seats[w].usedHeal) {
+    // 今夜没人被刀时，解药不能凭空使用
+    if (save == true && nightVictim != null && !seats[w].usedHeal) {
       witchSaved = true;
       seats[w].usedHeal = true;
     }
@@ -197,7 +269,7 @@ class Judge {
       if (!guarded && !witchSaved) deaths.add(v);
     }
     final p = witchPoisonTarget;
-    if (p != null && _guardTarget != p) deaths.add(p);
+    if (p != null && _guardTarget != p && !deaths.contains(p)) deaths.add(p);
     for (final d in deaths) {
       if (d >= 0 && d < seats.length) seats[d].alive = false;
     }
@@ -213,7 +285,7 @@ class Judge {
     witchPoisonTarget = null;
   }
 
-  /// 白天：从第一个死亡者的下家开始发言
+  /// 白天：从第一个出局者的下家开始发言
   int firstSpeaker() {
     if (deaths.isEmpty) return 0;
     final d = deaths.first;
@@ -227,12 +299,41 @@ class Judge {
     cur = nightOrder.first;
   }
 
-  /// 胜负判定
+  int get aliveWolfCount =>
+      seats.where((s) => s.alive && s.role == Role.werewolf).length;
+  int get aliveGoodCount =>
+      seats.where((s) => s.alive && s.role != Role.werewolf).length;
+  int get aliveGodCount =>
+      seats.where((s) => s.alive && s.role != null && isGodRole(s.role!)).length;
+  int get aliveVillagerCount =>
+      seats.where((s) => s.alive && s.role == Role.villager).length;
+
+  /// 胜负判定，返回 'good' / 'wolf' / null(继续)
+  ///
+  /// 屠城：狼全灭 -> 好人胜；狼数 >= 好人数 -> 狼胜
+  /// 屠边：狼全灭 -> 好人胜；神职全灭 或 平民全灭 -> 狼胜
   String? checkWinner() {
-    final aliveW = seats.where((s) => s.alive && s.role == Role.werewolf).length;
-    final aliveG = seats.where((s) => s.alive && s.role != Role.werewolf).length;
+    final aliveW = aliveWolfCount;
+    final aliveG = aliveGoodCount;
     if (aliveW == 0) return 'good';
-    if (aliveW >= aliveG) return 'wolf';
+    if (winMode == WinMode.slaughterAll) {
+      if (aliveW >= aliveG) return 'wolf';
+      return null;
+    }
+    // 屠边
+    if (hasGod && aliveGodCount == 0) return 'wolf';
+    if (hasVillager && aliveVillagerCount == 0) return 'wolf';
     return null;
+  }
+
+  /// 一句话说明当前胜利方式（房主界面/结算页展示）
+  String winReason() {
+    final w = checkWinner();
+    if (w == 'good') return '所有狼人出局';
+    if (w == null) return '';
+    if (winMode == WinMode.slaughterAll) return '好人全部出局';
+    if (hasGod && aliveGodCount == 0) return '神职全部出局（屠边）';
+    if (hasVillager && aliveVillagerCount == 0) return '平民全部出局（屠边）';
+    return '屠边成功';
   }
 }

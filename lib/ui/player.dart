@@ -30,9 +30,15 @@ class _PlayerState extends State<PlayerPage> {
   List<int> wolves = [];
   String? seerResult;   // 预言家验到的角色名
   int? nightVictim;     // 女巫看到的死者
+  bool canHeal = true;  // 解药还在
+  bool canPoison = true; // 毒药还在
   bool useHeal = false;
   int? poisonTarget;
-  bool voting = false;      // 是否处于投票阶段
+
+  bool voting = false;
+  bool revoteHint = false;
+  int? ejectedSeat;
+  int? gunSeat;
   Map<String, dynamic> tally = {};
   String? winner;
 
@@ -51,38 +57,61 @@ class _PlayerState extends State<PlayerPage> {
     setState(() {
       switch (t) {
         case 'role':
-          role = Role.values[(d['role'] as int?) ?? Role.villager.index];
-          yourName = (d['name'] as String?) ?? '';
+          final ri = d['role'];
+          role = Role.values[
+              ri is int && ri >= 0 && ri < Role.values.length ? ri : Role.villager.index];
+          seat = (d['seat'] as int?) ?? seat;
+          yourName = (d['name'] as String?) ?? yourName;
           stage = 'play';
         case 'roster':
           seatCount = (d['seats'] as List?)?.length ?? seatCount;
         case 'phase':
           final p = d['phase'] as String?;
-          alive = List<int>.from(d['alive'] as List? ?? const []);
-          deaths = List<int>.from(d['deaths'] as List? ?? const []);
-          if (p == 'dawn' || p == 'vote_revote') {
+          if (d['alive'] is List) alive = List<int>.from(d['alive'] as List);
+          if (d['deaths'] is List) deaths = List<int>.from(d['deaths'] as List);
+          if (p == 'night') {
+            // 新一夜：清掉上一轮所有临时状态
             actor = null;
+            voting = false;
+            ejectedSeat = null;
+            gunSeat = null;
+            deaths = [];
           }
-          if (p == 'vote_revote') tally = {};
+          if (p == 'dawn') {
+            actor = null;
+            voting = false;
+            ejectedSeat = null;
+          }
         case 'wake':
           actor = d['actor'] as String?;
           wolves = List<int>.from(d['wolves'] as List? ?? const []);
           seerResult = d['checked'] as String?;
           nightVictim = d['target'] as int?;
+          canHeal = (d['canHeal'] as bool?) ?? true;
+          canPoison = (d['canPoison'] as bool?) ?? true;
           useHeal = false;
           poisonTarget = null;
         case 'vote_open':
           actor = null;
           voting = true;
-          tally = {};
+          ejectedSeat = null;
+          gunSeat = null;
+          revoteHint = (d['revote'] as bool?) ?? false;
+          if (d['seats'] is List) alive = List<int>.from(d['seats'] as List);
         case 'vote_result':
           voting = false;
-          final t = d['tally'];
-          tally = t is Map ? Map<String, dynamic>.from(t) : {};
+          final tt = d['tally'];
+          tally = tt is Map ? Map<String, dynamic>.from(tt) : {};
+          ejectedSeat = d['ejected'] as int?;
+          gunSeat = d['gun'] as int?;
         case 'over':
           winner = d['winner'] as String?;
           actor = null;
+          voting = false;
           stage = 'over';
+        case 'gone':
+          err = '和房主断开了，重新连一下';
+          stage = 'connect';
         case 'cancel':
           tally = {};
       }
@@ -90,21 +119,30 @@ class _PlayerState extends State<PlayerPage> {
   }
 
   Future<void> _connect() async {
-    final host = ipCtrl.text.trim();
-    if (host.isEmpty) return;
-    setState(() => err = null);
-    final e = await guest.connect(host, lanPort, onMsg: _onMsg);
+    final a = parseAddr(ipCtrl.text);
+    if (a.ip.isEmpty) {
+      setState(() => err = '填一下房主屏幕上显示的地址');
+      return;
+    }
+    setState(() {
+      err = null;
+      stage = 'wait';
+    });
+    // onMsg 已在 initState 注册，重复传会重复回调
+    final e = await guest.connect(a.ip, a.port);
     if (!mounted) return;
     if (e != null) {
-      setState(() => err = e);
+      setState(() {
+        err = e;
+        stage = 'connect';
+      });
       return;
     }
     guest.send(msgJoin(nameCtrl.text.trim().isEmpty ? '玩家' : nameCtrl.text.trim()));
-    setState(() => stage = 'wait');
   }
 
-  // save / poison 在协议里都是"目标座位号"，类型是 int? 不是 bool?
-  void _sendAct(String kind, {int? target, int? save, int? poison}) {
+  /// save 是「是否用解药」(bool)，poison 是「毒谁」(座位号)
+  void _sendAct(String kind, {int? target, bool? save, int? poison}) {
     guest.send(actMsg(kind, target: target, save: save, poison: poison));
     setState(() => actor = null);
   }
@@ -112,6 +150,8 @@ class _PlayerState extends State<PlayerPage> {
   @override
   void dispose() {
     guest.close();
+    ipCtrl.dispose();
+    nameCtrl.dispose();
     super.dispose();
   }
 
@@ -140,7 +180,7 @@ class _PlayerState extends State<PlayerPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('房主开房间后会显示一个地址，填进来就行',
+        const Text('房主开房间后会显示一个地址（长这样 10.16.3.7:7788），照着填就行',
             style: TextStyle(color: Colors.white54, fontSize: 13)),
         const SizedBox(height: 18),
         const Text('你的名字', style: TextStyle(fontWeight: FontWeight.w700)),
@@ -149,11 +189,11 @@ class _PlayerState extends State<PlayerPage> {
           decoration: const InputDecoration(hintText: '比如 老张'),
         ),
         const SizedBox(height: 14),
-        const Text('房主地址', style: TextStyle(fontWeight: FontWeight.w700)),
+        const Text('房主地址（支持带端口）', style: TextStyle(fontWeight: FontWeight.w700)),
         TextField(
           controller: ipCtrl,
-          keyboardType: TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(hintText: '192.168.x.x'),
+          keyboardType: TextInputType.text,
+          decoration: const InputDecoration(hintText: '10.16.3.7 或 10.16.3.7:7789'),
         ),
         const SizedBox(height: 20),
         FilledButton.icon(
@@ -166,53 +206,38 @@ class _PlayerState extends State<PlayerPage> {
   }
 
   Widget _waitView() {
-    return const Center(
-      child: Padding(
-        padding: EdgeInsets.only(top: 120),
-        child: Column(
-          children: [
-            CircularProgressIndicator(),
-            SizedBox(height: 18),
-            Text('已连上法官，等房主发牌…', style: TextStyle(color: Colors.white54)),
-          ],
-        ),
-      ),
+    return Column(
+      children: [
+        const SizedBox(height: 100),
+        const CircularProgressIndicator(),
+        const SizedBox(height: 18),
+        const Text('已连上法官，等房主发牌…', style: TextStyle(color: Colors.white54)),
+        const SizedBox(height: 28),
+        TextButton(
+            onPressed: () => setState(() => stage = 'connect'),
+            child: const Text('返回重填地址')),
+      ],
     );
   }
 
   Widget _playView() {
     if (myTurn) return _actionView();
     if (voting) return _voteView();
-    if (deaths.isNotEmpty && role != null) return _dawnView();
+    if (ejectedSeat != null || gunSeat != null) return _resultView();
+    if (deaths.isNotEmpty) return _dawnView();
     return _idleView();
   }
 
-  /// 白天投票界面
+  /* ---------------- 投票 ---------------- */
+
   Widget _voteView() {
-    final ejected = tally['ejected'] as int?;
-    if (ejected != null) {
-      return Panel(
-        color: const Color(0xFFD33F49),
-        icon: Icons.gavel,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('投票结果', style: TextStyle(fontWeight: FontWeight.w800)),
-            const SizedBox(height: 10),
-            Text('${ejected + 1} 号被放逐',
-                style: const TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFFD33F49))),
-          ],
-        ),
-      );
-    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('🗳️ 投票 — 把你怀疑的人投出去',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+        Text(revoteHint ? '🗳️ 平票了，再投一轮' : '🗳️ 投票 — 把你怀疑的人投出去',
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
         const SizedBox(height: 8),
-        const Text('投完就等票数结算（你的票别人看不到）',
+        const Text('投完就等票数结算（你投给谁，只有法官看得到）',
             style: TextStyle(color: Colors.white60, fontSize: 13)),
         const SizedBox(height: 18),
         PickerGrid(
@@ -229,13 +254,43 @@ class _PlayerState extends State<PlayerPage> {
     );
   }
 
+  Widget _resultView() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('🗳️ 投票结果', style: TextStyle(fontSize: 21, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 14),
+        Panel(
+          color: const Color(0xFFD33F49),
+          icon: Icons.gavel,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                ejectedSeat == null ? '本轮无人出局' : '${ejectedSeat! + 1} 号被放逐',
+                style: const TextStyle(
+                    fontSize: 20, fontWeight: FontWeight.w800, color: Color(0xFFD33F49)),
+              ),
+              if (gunSeat != null) ...[
+                const SizedBox(height: 10),
+                Text('猎人开枪带走了 ${gunSeat! + 1} 号',
+                    style: const TextStyle(fontSize: 14, color: Color(0xFF4CAF7D))),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  /* ---------------- 日常视图 ---------------- */
+
   Widget _idleView() {
-    final dead = deaths;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         RoleCard(
-          role: role!,
+          role: role ?? Role.villager,
           name: '${seat + 1} 号 · $yourName',
         ),
         const SizedBox(height: 18),
@@ -253,25 +308,26 @@ class _PlayerState extends State<PlayerPage> {
               Wrap(
                 spacing: 10,
                 runSpacing: 8,
-                children: [
-                  ...List.generate(seatCount, (i) => Chip(
-                        label: Text('${i + 1}'),
-                        backgroundColor: alive.contains(i)
-                            ? (deaths.contains(i) ? const Color(0xFF2A2538) : const Color(0xFF3B3350))
-                            : const Color(0xFF2A2538),
-                      )),
-                ],
+                children: List.generate(
+                  seatCount,
+                  (i) => Chip(
+                    label: Text('${i + 1}'),
+                    backgroundColor: alive.contains(i)
+                        ? const Color(0xFF3B3350)
+                        : const Color(0xFF2A2538),
+                  ),
+                ),
               ),
             ],
           ),
         ),
         const SizedBox(height: 16),
-        if (dead.isNotEmpty)
+        if (deaths.isNotEmpty)
           Text(
-            dead.map((x) => '${x + 1} 号出局').join('，'),
+            deaths.map((x) => '${x + 1} 号出局').join('，'),
             style: const TextStyle(color: Color(0xFFD33F49), fontWeight: FontWeight.w800),
           ),
-        if (role != Role.werewolf)
+        if (role != null && role != Role.werewolf)
           const Padding(
             padding: EdgeInsets.only(top: 10),
             child: Text('盯紧发言，别被票出去',
@@ -303,10 +359,12 @@ class _PlayerState extends State<PlayerPage> {
     );
   }
 
+  /* ---------------- 夜间动作 ---------------- */
+
   Widget _actionView() {
     switch (actor) {
       case 'guard':
-        return _simplePick('守卫', '今晚要守护谁？（不能守护自己）', (t) => _sendAct('guard', target: t));
+        return _simplePick('守卫', '今晚要守护谁？（不能守自己）', (t) => _sendAct('guard', target: t));
       case 'werewolf':
         return _wolfView();
       case 'seer':
@@ -331,7 +389,8 @@ class _PlayerState extends State<PlayerPage> {
           icon: Icons.visibility,
           child: Text(
             seerResult ?? '未知',
-            style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: Color(0xFFE8A33D)),
+            style: const TextStyle(
+                fontSize: 26, fontWeight: FontWeight.w900, color: Color(0xFFE8A33D)),
           ),
         ),
         const SizedBox(height: 18),
@@ -358,7 +417,7 @@ class _PlayerState extends State<PlayerPage> {
         PickerGrid(
           seatCount: seatCount,
           target: -1,
-          dead: alive.isEmpty ? [] : _deadSeats(),
+          dead: _deadSeats(),
           onPick: onPick,
           label: '点一个座位',
         ),
@@ -366,10 +425,12 @@ class _PlayerState extends State<PlayerPage> {
     );
   }
 
-  List<int> _deadSeats() {
+  /// 出局的人 + 自己（守卫不能自守，但其它角色可以指自己）
+  List<int> _deadSeats([int? excludeSelf]) {
     final out = <int>[];
     for (var i = 0; i < seatCount; i++) {
-      if (!alive.contains(i) && i != seat) out.add(i);
+      if (i == excludeSelf) continue;
+      if (!alive.contains(i)) out.add(i);
     }
     return out;
   }
@@ -392,7 +453,7 @@ class _PlayerState extends State<PlayerPage> {
           target: -1,
           dead: _deadSeats(),
           onPick: (t) => _sendAct('werewolf', target: t),
-          label: '点一个座位（点空白=空刀）',
+          label: '点一个座位',
         ),
         const SizedBox(height: 18),
         OutlinedButton(
@@ -404,73 +465,93 @@ class _PlayerState extends State<PlayerPage> {
   }
 
   Widget _witchView() {
+    final noVictim = nightVictim == null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text('🧙 女巫请睁眼', style: TextStyle(fontSize: 21, fontWeight: FontWeight.w900)),
-        const SizedBox(height: 8),
+        const SizedBox(height: 10),
         Text(
-          nightVictim == null
-              ? '今夜没有人被刀'
-              : '法官告诉你：今夜 ${nightVictim! + 1} 号被刀了',
+          noVictim ? '法官告诉你：今夜没有人被刀' : '法官告诉你：今夜 ${nightVictim! + 1} 号被刀了',
           style: const TextStyle(color: Colors.white70, fontSize: 14),
         ),
-        const SizedBox(height: 18),
-        const Text('① 要不要用解药救他？', style: TextStyle(fontWeight: FontWeight.w700)),
-        Wrap(
-          spacing: 12,
-          children: [
-            ChoiceChip(
-              label: const Text('救'),
-              selected: useHeal,
-              onSelected: (_) => setState(() => useHeal = true),
-            ),
-            ChoiceChip(
-              label: const Text('不救'),
-              selected: !useHeal,
-              onSelected: (_) => setState(() => useHeal = false),
-            ),
-          ],
+        const SizedBox(height: 20),
+        Text(
+          canHeal ? '① 要不要用解药救他？' : '① 解药已经用掉了',
+          style: TextStyle(
+              fontWeight: FontWeight.w700,
+              color: canHeal ? Colors.white : Colors.white38),
         ),
-        const SizedBox(height: 18),
-        const Text('② 要不要用毒药毒人？', style: TextStyle(fontWeight: FontWeight.w700)),
-        PickerGrid(
-          seatCount: seatCount,
-          target: poisonTarget ?? -1,
-          dead: _deadSeats(),
-          onPick: (t) => setState(() => poisonTarget = t),
-          label: '点一个座位（再点一次=不用毒）',
+        const SizedBox(height: 10),
+        if (canHeal && !noVictim)
+          Wrap(
+            spacing: 12,
+            children: [
+              ChoiceChip(
+                label: const Text('救'),
+                selected: useHeal,
+                onSelected: (_) => setState(() => useHeal = true),
+              ),
+              ChoiceChip(
+                label: const Text('不救'),
+                selected: !useHeal,
+                onSelected: (_) => setState(() => useHeal = false),
+              ),
+            ],
+          )
+        else
+          const Text('（解药只能用在今夜被刀的人身上）',
+              style: TextStyle(fontSize: 12, color: Colors.white38)),
+        const SizedBox(height: 22),
+        Text(
+          canPoison ? '② 要不要用毒药毒人？' : '② 毒药已经用掉了',
+          style: TextStyle(
+              fontWeight: FontWeight.w700,
+              color: canPoison ? Colors.white : Colors.white38),
         ),
+        const SizedBox(height: 10),
+        if (canPoison)
+          PickerGrid(
+            seatCount: seatCount,
+            target: poisonTarget ?? -1,
+            dead: _deadSeats(),
+            onPick: (t) => setState(() => poisonTarget = poisonTarget == t ? null : t),
+            label: '点一个座位（再点一次取消）',
+          ),
         if (poisonTarget != null)
           OutlinedButton(
             onPressed: () => setState(() => poisonTarget = null),
             child: const Text('取消毒药'),
           ),
-        const SizedBox(height: 20),
+        const SizedBox(height: 22),
         FilledButton.icon(
-          onPressed: () => _sendAct('witch', save: useHeal ? nightVictim : null, poison: poisonTarget),
+          onPressed: () => _sendAct('witch',
+              save: canHeal && useHeal && !noVictim, poison: poisonTarget),
           icon: const Icon(Icons.check),
-          label: const Text('确认'),
+          label: const Text('确认，闭眼'),
         ),
       ],
     );
   }
 
   Widget _overView() {
-    final win = winner == 'good' ? role != Role.werewolf : winner == 'wolf' && role == Role.werewolf;
+    final win = winner == 'good'
+        ? role != Role.werewolf
+        : (winner == 'wolf' && role == Role.werewolf);
     return Column(
       children: [
         Icon(win ? Icons.sentiment_very_satisfied : Icons.sentiment_dissatisfied,
             size: 72, color: win ? const Color(0xFF4CAF7D) : const Color(0xFFD33F49)),
         const SizedBox(height: 14),
         Text(win ? '这局你赢了 🎉' : '这局你输了',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: win ? const Color(0xFF4CAF7D) : const Color(0xFFD33F49))),
+            style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.w900,
+                color: win ? const Color(0xFF4CAF7D) : const Color(0xFFD33F49))),
+        const SizedBox(height: 8),
+        Text(winnerText(winner ?? ''), style: const TextStyle(color: Colors.white54, fontSize: 13)),
         const SizedBox(height: 18),
-        Panel(
-          color: const Color(0xFF3B3350),
-          icon: Icons.loyalty,
-          child: RoleCard(role: role!, name: '你本局是 ${roleName[role!]}'),
-        ),
+        RoleCard(role: role ?? Role.villager, name: '你本局是 ${roleName[role] ?? '平民'}'),
       ],
     );
   }

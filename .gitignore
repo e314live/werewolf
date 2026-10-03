@@ -53,3 +53,6 @@ app.*.map.json
 /android/.gradle/
 /android/local.properties
 /android/app/src/main/res/values/*.xml.bak
+
+# 本地下载的 APK 成品（走 Releases 分发，不入代码库）
+/dist/

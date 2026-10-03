@@ -26,26 +26,46 @@ Future<List<String>> localIps() async {
 /// 房主：起一个局域网 TCP 服务当"法官主机"
 class LanHost {
   ServerSocket? _ss;
+  int? _port;
+  String? lastError;
   final List<Socket> clients = [];
   final List<void Function(String, Map<String, dynamic>)> listeners = [];
 
-  bool get running => _ss != null && !_ss!.address.isLoopback || _ss != null;
+  bool get running => _ss != null;
 
-  Future<String?> start(int port, {void Function(String, Map<String, dynamic>)? onMsg}) async {
+  /// 实际监听的端口（默认端口被占用时自动顺延）
+  int get port => _port ?? defaultPort;
+
+  /// 开房。preferred 起试，被占用就往后顺延，最多试 tries 个。
+  /// 返回实际端口；全部失败返回 null（原因在 lastError）。
+  Future<int?> start({
+    int preferred = defaultPort,
+    int tries = 12,
+    void Function(String, Map<String, dynamic>)? onMsg,
+  }) async {
     if (onMsg != null) listeners.add(onMsg);
-    try {
-      _ss = await ServerSocket.bind(InternetAddress.anyIPv4, port);
-    } on SocketException catch (e) {
-      return '端口被占用：${e.message}';
+    await stop();
+    lastError = null;
+    for (var i = 0; i < tries; i++) {
+      final p = preferred + i;
+      if (p > 65535) break;
+      try {
+        _ss = await ServerSocket.bind(InternetAddress.anyIPv4, p);
+        _port = p;
+        break;
+      } on SocketException catch (e) {
+        lastError = e.message.isEmpty ? '端口 $p 不可用' : e.message;
+        _ss = null;
+      }
     }
+    if (_ss == null) return null;
     _ss!.listen((sock) {
       clients.add(sock);
       final buf = StringBuffer();
       sock.listen(
         (data) {
           buf.write(String.fromCharCodes(data));
-          var s = buf.toString();
-          final parts = s.split('\n');
+          final parts = buf.toString().split('\n');
           for (var i = 0; i < parts.length - 1; i++) {
             final m = fromLine(parts[i]);
             if (m != null) {
@@ -59,7 +79,7 @@ class LanHost {
         onDone: () => _drop(sock),
       );
     });
-    return null;
+    return _port;
   }
 
   void _drop(Socket s) {
@@ -103,6 +123,7 @@ class LanHost {
     clients.clear();
     await _ss?.close();
     _ss = null;
+    _port = null;
   }
 }
 
@@ -119,7 +140,7 @@ class LanGuest {
     try {
       _sock = await Socket.connect(host, port, timeout: const Duration(seconds: 6));
     } on Exception catch (e) {
-      return '连不上房主：$e';
+      return '连不上房主 $host:$port —— $e';
     }
     final buf = StringBuffer();
     _sock!.listen(
