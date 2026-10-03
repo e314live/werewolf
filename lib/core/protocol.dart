@@ -40,6 +40,12 @@ Map<String, dynamic>? fromLine(String raw) {
 /// role 用 Role.index（int），客户端直接查表，避免中文名对不上
 String msgRole(int seat, String name, int roleIndex) =>
     toLine(enc('role', {'seat': seat, 'name': name, 'role': roleIndex}));
+
+/// 入房回执：告诉你自己是几号，以及总人数
+String msgSeat(int seat, int total) => toLine(enc('seat', {'seat': seat, 'total': total}));
+
+/// 房间坐满了，进不来
+String msgFull() => toLine(enc('full', {}));
 String msgRoster(List<dynamic> seats) => toLine(enc('roster', {'seats': seats}));
 String msgWake(int seat, String actor,
         {List<int>? wolves,
@@ -77,7 +83,9 @@ String msgSheriff(int seat, {bool? voteResult}) =>
 String msgCancel() => toLine(enc('cancel', {}));
 
 /* ---------- 客户端 -> 房主 ---------- */
-String msgJoin(String name) => toLine(enc('join', {'name': name}));
+/// cid = 客户端自报的稳定身份，断线重连时用来认回原来的座位
+String msgJoin(String name, String cid) =>
+    toLine(enc('join', {'name': name, 'cid': cid}));
 String msgReady() => toLine(enc('ready', {}));
 String msgPass() => toLine(enc('pass', {}));
 

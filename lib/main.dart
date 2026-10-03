@@ -79,12 +79,14 @@ class HomePage extends StatelessWidget {
                   icon: Icons.mobile_friendly_outlined,
                   color: const Color(0xFF3F8EE0),
                   title: '我是玩家',
-                  sub: '输入房主地址，加入牌局',
+                  sub: '装 App 填地址，或用浏览器直接打开',
                   onTap: () => _go(context, const PlayerPage()),
                 ),
                 const SizedBox(height: 40),
                 const Text(
-                  '无需蓝牙配对 · 无需开热点 · 无需联网服务器\n宿舍里连同一个校园网就能开局',
+                  '无需蓝牙配对 · 无需开热点 · 无需联网服务器\n'
+                  '宿舍里连同一个校园网就能开局\n'
+                  '苹果 / 鸿蒙的室友不用装东西，用浏览器打开房主的 http 地址即可',
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 11, height: 1.7, color: Colors.white38),
                 ),

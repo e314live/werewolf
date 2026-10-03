@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../core/judge.dart';
 import '../core/protocol.dart';
+import '../core/room.dart';
 import '../net/lan.dart';
 import 'common.dart';
 
@@ -13,7 +14,6 @@ class HostPage extends StatefulWidget {
 }
 
 class _HostState extends State<HostPage> {
-  int peopleCount = 9;
   bool sheriffOn = true;
   WinMode winMode = WinMode.slaughterSide;
   int? wolfOverride; // null = 按人数自动配狼
@@ -30,14 +30,28 @@ class _HostState extends State<HostPage> {
   static bool? _asBool(dynamic v) => v is bool ? v : null;
 
   Judge? j;
-  final List<String> names = ['房主(你)'];
-  final Set<int> joined = {0};
+
+  /// 座位全交给 Room 管（纯逻辑、可单测）。
+  /// 之前用 clients.length-1 当座位号，导致第一个进房的人抢走房主的 0 号，
+  /// 而且人数永远凑不满 —— 游戏根本开不了局。
+  final Room room = Room(playerCount: 9);
+
+  int get peopleCount => room.playerCount;
+
+  void _setPeople(int n) {
+    final v = n.clamp(minPlayers, maxPlayers);
+    setState(() {
+      room.setPlayerCount(v);
+      wolfOverride = null;
+    });
+  }
+
   final Set<String> nightDone = {};
   final Set<int> voted = {};
   bool revote = false;      // 上一轮平票，正在重投
   bool hostVoted = false;   // 房主（0 号）这一轮投过票没
 
-  bool get allJoined => joined.length >= peopleCount;
+  bool get allJoined => room.full;
 
   @override
   void dispose() {
@@ -73,51 +87,95 @@ class _HostState extends State<HostPage> {
     if (mounted) setState(() => ips = l);
   }
 
-  void _onFromClient(String ip, Map<String, dynamic> m) {
-    final t = m['t'] as String?;
-    final d = (m['d'] as Map?) ?? {};
-    if (t == 'join') {
-      final name = (d['name'] as String? ?? '室友').trim();
-      final seat = lan.clients.length - 1; // 房主占 0 号
-      if (seat < 0 || seat >= peopleCount) return;
-      if (!mounted) return;
-      setState(() {
-        while (names.length <= seat) {
-          names.add('');
-        }
-        names[seat] = name;
-        joined.add(seat);
-      });
-      // 此时还没发牌，只广播名册；牌在开局时单独下发
-      lan.broadcast(msgRoster(_rosterJson()));
-    } else if (t == 'act' || t == 'pass') {
-      final seat = _seatByIp(ip);
-      if (seat == null) return;
-      if (t == 'pass') {
-        _handleAction(seat, 'pass');
-        return;
-      }
-      final kind = d['kind'] as String?;
-      if (kind == 'vote') {
-        final target = _asInt(d['target']);
-        if (target != null) {
-          setState(() {
-            _votes[target] = (_votes[target] ?? 0) + 1;
-            voted.add(seat);
-          });
-        }
-        return;
-      }
-      _handleAction(seat, kind,
-          target: _asInt(d['target']), save: _asBool(d['save']), poison: _asInt(d['poison']));
-    }
+  String _nameAt(int s) => room.nameAt(s);
+
+  void _toSeat(int seat, String line) {
+    final id = room.peerAt[seat];
+    if (id != null) lan.sendToPeer(id, line);
   }
 
-  int? _seatByIp(String ip) {
-    for (var i = 0; i < lan.clients.length; i++) {
-      if (lan.clients[i].remoteAddress.address == ip) return i == 0 ? null : i;
+  void _started() => j != null;
+
+  void _onFromClient(String peerId, Map<String, dynamic> m) {
+    final t = m['t'] as String?;
+    final d = (m['d'] as Map?) ?? {};
+
+    // 断开：开局后保留座位（等他重连认回来），开局前直接腾空
+    if (t == 'gone') {
+      final freed = room.leave(peerId, keepSeatForRejoin: _started());
+      if (!mounted) return;
+      setState(() {});
+      if (freed != null) lan.broadcast(msgRoster(_rosterJson()));
+      return;
     }
-    return null;
+
+    if (t == 'join') {
+      final name = ((d['name'] as String?) ?? '室友').trim();
+      final cid = (d['cid'] as String?) ?? '';
+      if (cid.isNotEmpty) lan.bindCid(cid, peerId);
+
+      final seat = room.join(peerId, cid, name);
+      if (seat == null) {
+        lan.sendToPeer(peerId, msgFull());
+        return;
+      }
+      if (!mounted) return;
+      setState(() {});
+      lan.sendToPeer(peerId, msgSeat(seat, peopleCount));
+      lan.broadcast(msgRoster(_rosterJson()));
+      // 已经开局的（掉线重连），把身份和当前进度补发给他
+      if (_started()) _resendState(seat);
+      return;
+    }
+
+    final seat = room.seatOf[peerId];
+    if (seat == null) return;
+
+    if (t == 'pass') {
+      _handleAction(seat, 'pass');
+      return;
+    }
+    if (t != 'act') return;
+
+    final kind = d['kind'] as String?;
+    if (kind == 'vote') {
+      final target = _asInt(d['target']);
+      if (target != null) {
+        setState(() {
+          _votes[target] = (_votes[target] ?? 0) + 1;
+          voted.add(seat);
+        });
+      }
+      return;
+    }
+    _handleAction(seat, kind,
+        target: _asInt(d['target']), save: _asBool(d['save']), poison: _asInt(d['poison']));
+  }
+
+  /// 掉线重连：把他的身份、当前阶段、以及"此刻该他干什么"补齐
+  void _resendState(int seat) {
+    final judge = j;
+    if (judge == null) return;
+    final role = judge.seats[seat].role;
+    if (role != null) {
+      lan.sendToPeer(room.peerAt[seat]!, msgRole(seat, _nameAt(seat), role.index));
+    }
+    final ph = judge.phase == Phase.nightRole ? 'night' : 'dawn';
+    lan.sendToPeer(
+        room.peerAt[seat]!,
+        msgPhase(ph, judge.round,
+            deaths: judge.deaths, alive: _aliveList()));
+    if (judge.phase == Phase.over) {
+      lan.sendToPeer(room.peerAt[seat]!, msgOver(judge.checkWinner() ?? 'good'));
+    } else if (judge.phase == Phase.voting) {
+      lan.sendToPeer(room.peerAt[seat]!, msgVoteOpen(_aliveList(), revote: revote));
+    } else if (judge.phase == Phase.nightRole) {
+      final r = judge.pendingRole;
+      final actorSeat = _actorSeatOf(r);
+      if (r != null && actorSeat == seat) {
+        lan.sendToPeer(room.peerAt[seat]!, _wakeLine(r, seat));
+      }
+    }
   }
 
   /// 客户端上报夜动作，房主记账并推进
@@ -140,7 +198,7 @@ class _HostState extends State<HostPage> {
         if (target != null) {
           final res = judge.seerCheck(target);
           if (res != null) {
-            lan.sendToSeat(seat, msgWake(seat, 'seer_result', target: target, checked: roleName[res]));
+            _toSeat(seat, msgWake(seat, 'seer_result', target: target, checked: roleName[res]));
           }
         }
         break;
@@ -156,7 +214,7 @@ class _HostState extends State<HostPage> {
   /// 发牌：洗好整副牌，只把「你自己那张」发给你
   void _startGame() {
     if (!allJoined) {
-      _toast('还差 ${peopleCount - joined.length} 人没进房间');
+      _toast('还差 ${peopleCount - room.joined.length} 人没进房间');
       return;
     }
     final judge = Judge(
@@ -175,53 +233,60 @@ class _HostState extends State<HostPage> {
     });
     judge.deal();
     for (var s = 1; s < peopleCount; s++) {
-      lan.sendToSeat(s, msgRole(s, names[s], judge.seats[s].role!.index));
+      _toSeat(s, msgRole(s, _nameAt(s), judge.seats[s].role!.index));
     }
     lan.broadcast(msgRoster(_rosterJson()));
-    lan.broadcast(msgPhase('night', judge.round));
+    // 必须带上 alive：玩家端靠它判断哪些座位还能点，不带的话第一夜所有座位都是灰的
+    lan.broadcast(msgPhase('night', judge.round, alive: _aliveList()));
   }
 
   List<dynamic> _rosterJson() => List.generate(peopleCount, (i) => {
         'id': i,
-        'name': i < names.length && names[i].isNotEmpty ? names[i] : (i == 0 ? '房主' : '玩家${i + 1}'),
-        'alive': true,
+        'name': i == 0 ? '房主' : _nameAt(i),
+        'alive': j?.seats[i].alive ?? true,
         'role': null,
         'isOwner': i == 0,
       });
 
-  void _callWake() {
+  /// 当前该睁眼的角色坐在几号；没有/已出局返回 null
+  int? _actorSeatOf(Role? r) {
     final judge = j!;
-    final r = judge.pendingRole!;
-    final seat = switch (r) {
+    return switch (r) {
       Role.guard => judge.guardSeat,
       Role.werewolf => judge.wolfSeat,
       Role.seer => judge.seerSeat,
       Role.witch => judge.witchSeat,
       _ => null,
     };
+  }
+
+  /// 发给某人"轮到你睁眼"的那条消息
+  String _wakeLine(Role r, int seat) {
+    final judge = j!;
+    final wolves = r == Role.werewolf
+        ? judge.seats
+            .where((s) => s.role == Role.werewolf && s.alive)
+            .map((s) => s.id)
+            .toList()
+        : null;
+    final isWitch = r == Role.witch;
+    return msgWake(seat, r.name,
+        wolves: wolves,
+        target: isWitch ? judge.nightVictim : null,
+        canHeal: isWitch ? !judge.seats[seat].usedHeal : null,
+        canPoison: isWitch ? !judge.seats[seat].usedPoison : null);
+  }
+
+  void _callWake() {
+    final r = j!.pendingRole!;
+    final seat = _actorSeatOf(r);
     if (seat == null) {
       // 该角色已死或不存在 -> 直接跳过
       setState(() => nightDone.add(r.name));
       _nextStep();
       return;
     }
-    final wolves = r == Role.werewolf
-        ? judge.seats.where((s) => s.role == Role.werewolf && s.alive).map((s) => s.id).toList()
-        : null;
-    // 女巫需要知道今夜被刀的是谁 + 自己药还剩几瓶
-    final witchSeat = r == Role.witch ? judge.witchSeat : null;
-    lan.sendToSeat(
-        seat,
-        msgWake(
-          seat,
-          r.name,
-          wolves: wolves,
-          target: r == Role.witch ? judge.nightVictim : null,
-          canHeal:
-              witchSeat != null ? !judge.seats[witchSeat].usedHeal : null,
-          canPoison:
-              witchSeat != null ? !judge.seats[witchSeat].usedPoison : null,
-        ));
+    _toSeat(seat, _wakeLine(r, seat));
     setState(() {});
   }
 
@@ -291,10 +356,7 @@ class _HostState extends State<HostPage> {
             children: [
               IconButton.filledTonal(
                 onPressed: peopleCount > minPlayers
-                    ? () => setState(() {
-                          peopleCount--;
-                          wolfOverride = null;
-                        })
+                    ? () => _setPeople(peopleCount - 1)
                     : null,
                 icon: const Icon(Icons.remove),
               ),
@@ -306,10 +368,7 @@ class _HostState extends State<HostPage> {
               ),
               IconButton.filledTonal(
                 onPressed: peopleCount < maxPlayers
-                    ? () => setState(() {
-                          peopleCount++;
-                          wolfOverride = null;
-                        })
+                    ? () => _setPeople(peopleCount + 1)
                     : null,
                 icon: const Icon(Icons.add),
               ),
@@ -324,10 +383,7 @@ class _HostState extends State<HostPage> {
                       label: Text('$n'),
                       selected: peopleCount == n,
                       showCheckmark: false,
-                      onSelected: (_) => setState(() {
-                        peopleCount = n;
-                        wolfOverride = null;
-                      }),
+                      onSelected: (_) => _setPeople(n),
                     ))
                 .toList(),
           ),
@@ -439,34 +495,50 @@ class _HostState extends State<HostPage> {
                       style: TextStyle(fontSize: 12, color: Colors.white60)),
                   const SizedBox(height: 12),
                   ...ips.map((ip) => Padding(
-                        padding: const EdgeInsets.only(bottom: 6),
-                        child: SelectableText(
-                          '$ip:${lan.port}',
-                          style: const TextStyle(
-                              fontSize: 26,
-                              fontWeight: FontWeight.w900,
-                              color: Color(0xFF8E5BD6),
-                              letterSpacing: 1),
+                        padding: const EdgeInsets.only(bottom: 14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SelectableText(
+                              '$ip:${lan.port}',
+                              style: const TextStyle(
+                                  fontSize: 26,
+                                  fontWeight: FontWeight.w900,
+                                  color: Color(0xFF8E5BD6),
+                                  letterSpacing: 1),
+                            ),
+                            const SizedBox(height: 6),
+                            SelectableText(
+                              'http://$ip:${lan.port}',
+                              style: const TextStyle(
+                                  fontSize: 13, color: Color(0xFF8E5BD6)),
+                            ),
+                          ],
                         ),
                       )),
                   if (ips.isEmpty)
                     const Text('没读到 IP，请确认连着校园网/同一个 WiFi',
                         style: TextStyle(fontSize: 12, color: Colors.white38)),
+                  const Text(
+                    '安卓装上 App 后填上面那串；苹果 / 鸿蒙的室友把下面那条 http 链接发给他，'
+                    '用手机浏览器打开就能当玩家，不用装任何东西。',
+                    style: TextStyle(fontSize: 11.5, height: 1.7, color: Colors.white54),
+                  ),
                 ],
               ),
             ),
             const SizedBox(height: 18),
-            Text('进房情况：${joined.length}/$peopleCount',
+            Text('进房情况：${room.joined.length}/$peopleCount',
                 style: const TextStyle(fontWeight: FontWeight.w700)),
             const SizedBox(height: 10),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: List.generate(peopleCount, (i) {
-                final on = joined.contains(i);
+                final on = room.joined.contains(i);
                 return Chip(
                   avatar: on ? const Icon(Icons.check, size: 16) : null,
-                  label: Text(on ? names[i] : '空位 ${i + 1}'),
+                  label: Text(on ? _nameAt(i) : '空位 ${i + 1}'),
                   backgroundColor: on ? const Color(0xFF3B3350) : const Color(0xFF1D1A28),
                 );
               }),
@@ -846,7 +918,7 @@ class _HostState extends State<HostPage> {
       judge.startNextNight();
       nightDone.clear();
       // 告诉所有玩家：新一轮天黑，清掉上一轮的投票结果等状态
-      lan.broadcast(msgPhase('night', judge.round));
+      lan.broadcast(msgPhase('night', judge.round, alive: _aliveList()));
     }
     setState(() {});
   }
@@ -875,7 +947,7 @@ class _HostState extends State<HostPage> {
             spacing: 10,
             runSpacing: 6,
             children: List.generate(j!.playerCount, (i) => Chip(
-                  label: Text('${i + 1}号 ${names[i]}：${roleName[j!.seats[i].role!]}'),
+                  label: Text('${i + 1}号 ${_nameAt(i)}：${roleName[j!.seats[i].role!]}'),
                   backgroundColor: const Color(0xFF2A2538),
                 )),
           ),

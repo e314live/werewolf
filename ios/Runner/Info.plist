@@ -8,6 +8,18 @@
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
 	<string>狼邮杀</string>
+	<!-- 房主/玩家都要在局域网里直连，iOS 必须显式申请本地网络权限 -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>狼邮杀需要访问本地网络，才能和同一个 WiFi 下的室友连成一局。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_werewolf._tcp</string>
+	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

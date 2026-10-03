@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 
 import '../core/judge.dart';
@@ -15,7 +17,11 @@ class PlayerPage extends StatefulWidget {
 class _PlayerState extends State<PlayerPage> {
   final ipCtrl = TextEditingController(text: '192.168.');
   final nameCtrl = TextEditingController(text: '');
-  final guest = LanGuest();
+
+  /// 本次开 App 的稳定身份：断线重连时房主凭它认回原来的座位
+  final String cid =
+      'g${DateTime.now().microsecondsSinceEpoch}-${Random().nextInt(99999)}';
+  final guest = LanGuest(cid);
 
   String stage = 'connect'; // connect|wait|play|over
   String? err;
@@ -56,12 +62,19 @@ class _PlayerState extends State<PlayerPage> {
     if (!mounted) return;
     setState(() {
       switch (t) {
+        case 'seat':
+          seat = (d['seat'] as int?) ?? seat;
+          seatCount = (d['total'] as int?) ?? seatCount;
+        case 'full':
+          err = '房间已经坐满了，让房主把人数加一加';
+          stage = 'connect';
         case 'role':
           final ri = d['role'];
           role = Role.values[
               ri is int && ri >= 0 && ri < Role.values.length ? ri : Role.villager.index];
           seat = (d['seat'] as int?) ?? seat;
           yourName = (d['name'] as String?) ?? yourName;
+          if (alive.isEmpty) alive = List.generate(seatCount, (i) => i);
           stage = 'play';
         case 'roster':
           seatCount = (d['seats'] as List?)?.length ?? seatCount;
@@ -129,7 +142,8 @@ class _PlayerState extends State<PlayerPage> {
       stage = 'wait';
     });
     // onMsg 已在 initState 注册，重复传会重复回调
-    final e = await guest.connect(a.ip, a.port);
+    final nm = nameCtrl.text.trim().isEmpty ? '玩家' : nameCtrl.text.trim();
+    final e = await guest.connect(a.ip, a.port, name: nm);
     if (!mounted) return;
     if (e != null) {
       setState(() {
@@ -138,7 +152,6 @@ class _PlayerState extends State<PlayerPage> {
       });
       return;
     }
-    guest.send(msgJoin(nameCtrl.text.trim().isEmpty ? '玩家' : nameCtrl.text.trim()));
   }
 
   /// save 是「是否用解药」(bool)，poison 是「毒谁」(座位号)
@@ -211,7 +224,13 @@ class _PlayerState extends State<PlayerPage> {
         const SizedBox(height: 100),
         const CircularProgressIndicator(),
         const SizedBox(height: 18),
-        const Text('已连上法官，等房主发牌…', style: TextStyle(color: Colors.white54)),
+        Text(
+          seat >= 0
+              ? '你是 ${seat + 1} 号 · 已连上法官，等房主发牌…'
+              : '已连上法官，等房主发牌…',
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: Colors.white54),
+        ),
         const SizedBox(height: 28),
         TextButton(
             onPressed: () => setState(() => stage = 'connect'),
@@ -312,7 +331,8 @@ class _PlayerState extends State<PlayerPage> {
                   seatCount,
                   (i) => Chip(
                     label: Text('${i + 1}'),
-                    backgroundColor: alive.contains(i)
+                    // alive 为空 = 还没收到过存活名单，一律按"都活着"显示
+                    backgroundColor: (alive.isEmpty || alive.contains(i))
                         ? const Color(0xFF3B3350)
                         : const Color(0xFF2A2538),
                   ),
@@ -396,7 +416,8 @@ class _PlayerState extends State<PlayerPage> {
         const SizedBox(height: 18),
         FilledButton.icon(
           onPressed: () {
-            guest.send(msgReady());
+            // 和网页端保持一致：走 pass，房主那边直接把这位标记为"done"
+            guest.send(msgPass());
             setState(() => actor = null);
           },
           icon: const Icon(Icons.check),
@@ -426,8 +447,11 @@ class _PlayerState extends State<PlayerPage> {
   }
 
   /// 出局的人 + 自己（守卫不能自守，但其它角色可以指自己）
+  /// alive 为空 = 还没收到过存活名单，一律按"都活着"处理，
+  /// 否则第一夜所有座位都会被灰掉、根本点不动。
   List<int> _deadSeats([int? excludeSelf]) {
     final out = <int>[];
+    if (alive.isEmpty) return out;
     for (var i = 0; i < seatCount; i++) {
       if (i == excludeSelf) continue;
       if (!alive.contains(i)) out.add(i);
