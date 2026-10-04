@@ -71,6 +71,15 @@ void main() {
     ok(p.contains('function $f('), '有 $f');
   }
 
+  print('--- 号码牌位必须带名字（点刀/投票时才知道点的是谁） ---');
+  final sg = RegExp(r'function seatGrid\([\s\S]*?\n\}').firstMatch(p)?.group(0) ?? '';
+  ok(sg.isNotEmpty, '抽出了 seatGrid 函数体');
+  ok(sg.contains('nmOnly'), '座位里渲染了对应玩家的名字');
+  ok(RegExp(r'<em>').hasMatch(sg), '名字排在号码下方');
+  ok(p.contains('function nmOnly('), '有 nmOnly() 取名字');
+  ok(RegExp(r'wolves[\s\S]{0,140}?filter').hasMatch(p),
+      '狼队友里滤掉了自己（不然会看到「你的狼队友：你自己」）');
+
   print('--- 引用的处理函数必须真的存在（防 pickPoison 那种幽灵函数） ---');
   final defined = RegExp(r'function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(')
       .allMatches(p)
@@ -81,8 +90,14 @@ void main() {
   for (final x in RegExp(r'onclick=\\?"([A-Za-z_$][A-Za-z0-9_$]*)\(').allMatches(p)) {
     referenced.add(x.group(1)!);
   }
-  // seatGrid(...,"fn") 这种把函数名当参数传的
-  for (final x in RegExp(r',\s*"([A-Za-z_$][A-Za-z0-9_$]*)"\s*\)').allMatches(p)) {
+  // seatGrid(...,"fn") 这种把函数名当参数传的。
+  // 后面允许跟 , 或 )，好把 seatGrid(dead,sel,"actWolf",wolves) 也算进来。
+  for (final x in RegExp(r',\s*"([A-Za-z_$][A-Za-z0-9_$]*)"\s*[,)]').allMatches(p)) {
+    referenced.add(x.group(1)!);
+  }
+  // 点座位的那些函数名，全都要真的存在
+  for (final x in RegExp(r'seatGrid\([\s\S]{0,120}?"([A-Za-z_$][A-Za-z0-9_$]*)"\s*[,)]')
+      .allMatches(p)) {
     referenced.add(x.group(1)!);
   }
   final missing = referenced.where((f) => !defined.contains(f)).toList()..sort();

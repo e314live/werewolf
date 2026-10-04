@@ -20,22 +20,27 @@ void ok(bool c, String name) {
 Future<void> tick([int ms = 300]) =>
     Future.delayed(Duration(milliseconds: ms));
 
+/// 用一组冷门端口做测试。
+/// 默认的 7788 很可能被你本地开着的预览服务（preview_host.dart）占着，
+/// 那时候这个脚本会莫名其妙地崩，跟你改的代码其实一点关系都没有。
+const int testBase = 17788;
+
 Future<void> main() async {
   print('--- LanHost 端口顺延 ---');
-  final blocker = await ServerSocket.bind(InternetAddress.anyIPv4, 7788);
+  final blocker = await ServerSocket.bind(InternetAddress.anyIPv4, testBase);
 
   final h = LanHost();
   final seen = <String, List<Map<String, dynamic>>>{};
-  final got = await h.start(onMsg: (peer, m) {
+  final got = await h.start(preferred: testBase, onMsg: (peer, m) {
     (seen[peer] ??= []).add(m);
   });
-  ok(got == 7789, '7788 被占用时自动顺延到 7789（实际 $got）');
+  ok(got == testBase + 1, '$testBase 被占用时自动顺延（实际 $got）');
   ok(h.lastError == null, '成功后 lastError 被清空（实际 ${h.lastError}）');
   ok(h.lastErrorIsPermission == false, '成功后权限标记为 false');
   ok(h.running, '服务处于运行态');
 
   print('--- 重复开房 ---');
-  final again = await h.start(onMsg: (peer, m) {
+  final again = await h.start(preferred: testBase, onMsg: (peer, m) {
     (seen[peer] ??= []).add(m);
   });
   ok(again != null, '二次开房成功');

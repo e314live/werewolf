@@ -147,21 +147,25 @@ async function main() {
 
   console.log('--- 夜里狼人睁眼 ---');
   ok(await waitFor('狼人请睁眼'), '进入狼人操作界面');
-  ok(appHtml.includes('4号'), '看得到狼队友 4 号');
+  ok(/4 号[^<]*/.test(appHtml), '看得到狼队友 4 号');
+  ok(!/狼队友：[\s\S]{0,80}?2 号/.test(appHtml), '狼队友名单里不含自己');
   ok(appHtml.includes('本轮空刀'), '有空刀按钮');
   ok(appHtml.includes('onclick="actWolf(2)"'), '座位按钮可点');
+  // 选号时要能看见号码底下是谁（用户明确要求）
+  ok(/<em>[^<]*<\/em>/.test(appHtml), '号码牌位下方渲染了名字');
+  ok(appHtml.includes('<em>' + '玩家' + '4</em>'), '4 号座位下写着「玩家4」');
 
   console.log('--- 点刀 -> 天亮 ---');
   globalThis.actWolf(2);
   ok(await waitFor('天亮了'), '收到天亮公示');
-  ok(appHtml.includes('3 号出局'), '公示 3 号出局（刀的是 2 号座位）');
+  ok(/3 号[^<]*出局/.test(appHtml), '公示 3 号出局（刀的是 2 号座位），并带上名字');
   ok(await waitFor('投票'), '自动进入投票界面');
 
   console.log('--- 投票 -> 结算 ---');
   ok(appHtml.includes('onclick="doVote(3)"'), '投票按钮可点');
   globalThis.doVote(3);
   ok(await waitFor('投票结果'), '收到投票结果');
-  ok(appHtml.includes('4 号被放逐'), '显示被放逐的 4 号');
+  ok(/4 号[^<]*被放逐/.test(appHtml), '显示被放逐的 4 号（带名字）');
   ok(await waitFor('投票'), '票型能看到');
 
   console.log('--- 结束 ---');

@@ -61,3 +61,6 @@ app.*.map.json
 /android/key.properties
 *.jks
 *.keystore
+
+# 本机 UI 自查截图（D:/Dev/shot.mjs 生成，看一眼就扔）
+/shots/

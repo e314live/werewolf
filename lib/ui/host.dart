@@ -266,7 +266,9 @@ class _HostState extends State<HostPage> {
     final judge = j!;
     final wolves = r == Role.werewolf
         ? judge.seats
-            .where((s) => s.role == Role.werewolf && s.alive)
+            // 队友 = 除了我自己以外的狼。
+            // 少了 id != seat 这一条，每个狼人都会在自己的队友列表里看到自己。
+            .where((s) => s.role == Role.werewolf && s.alive && s.id != seat)
             .map((s) => s.id)
             .toList()
         : null;

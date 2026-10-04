@@ -43,14 +43,16 @@ Future<void> main() async {
                   'role': null,
                   'isOwner': i == 0,
                 })));
-        // 剧本：这个玩家是狼人，队友是 4 号（座位 3）
+        // 剧本：这个玩家是狼人，队友是 4 号（座位 3）。队友里不含自己
         await poke(peerId, msgRole(seat, room.nameAt(seat), Role.werewolf.index));
         await poke(peerId,
             msgPhase('night', 1, alive: [0, 1, 2, 3, 4, 5]), 100);
         await poke(
             peerId,
             msgWake(seat, Role.werewolf.name,
-                wolves: [seat, 3], canHeal: null, canPoison: null),
+                wolves: [3].where((w) => w != seat).toList(),
+                canHeal: null,
+                canPoison: null),
             100);
         return;
       }
